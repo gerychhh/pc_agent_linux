@@ -357,11 +357,12 @@ class VoiceAgentRuntime:
 
         if self.state.name == "LISTENING":
             self.vad.process_chunk(data, ts)
-            # Feed ASR mono 1-D int16 to avoid shape mismatches (preroll is 1-D).
-            mono_for_asr = data[:, 0] if getattr(data, "ndim", 1) > 1 else data
-            if getattr(mono_for_asr, "dtype", None) != np.int16:
-                mono_for_asr = mono_for_asr.astype(np.int16, copy=False)
-            self.asr.accept_audio(mono_for_asr, ts)
+            if self.vad.speaking:
+                # Feed ASR mono 1-D int16 to avoid shape mismatches (preroll is 1-D).
+                mono_for_asr = data[:, 0] if getattr(data, "ndim", 1) > 1 else data
+                if getattr(mono_for_asr, "dtype", None) != np.int16:
+                    mono_for_asr = mono_for_asr.astype(np.int16, copy=False)
+                self.asr.accept_audio(mono_for_asr, ts)
             return
 
         if self.state.name == "DECODING":
