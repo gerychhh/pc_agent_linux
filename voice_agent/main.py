@@ -118,7 +118,6 @@ class VoiceAgentRuntime:
         self._last_chunk_ts: float = 0.0
         self._armed_since: float | None = None
         self._wake_words = self._build_wake_words(wake_cfg)
-        self._last_vad_voice_ts: float | None = None
 
         # Components
         self.audio = AudioCapture(
@@ -301,11 +300,6 @@ class VoiceAgentRuntime:
         self._listening_started_at = time.monotonic()
 
         try:
-            if self._preroll_buf.size:
-                self.asr.accept_audio(self._preroll_buf.copy(), ts)
-        except Exception:
-            pass
-        try:
             if self._last_chunk is not None:
                 lc = self._last_chunk
                 lc_mono = lc[:, 0] if getattr(lc, "ndim", 1) > 1 else lc
@@ -339,7 +333,6 @@ class VoiceAgentRuntime:
                     self._preroll_buf = self._preroll_buf[-self._preroll_samples :]
 
         if self.state.name == "IDLE":
-            self.vad.process_chunk(data, ts)
             self.wake_word.process_chunk(data, ts)
             return
 
@@ -381,11 +374,6 @@ class VoiceAgentRuntime:
         self._status("wake.scores", dict(event.payload))
 
     def _on_vad_score(self, event: Event) -> None:
-        if event.payload.get("is_voice"):
-            try:
-                self._last_vad_voice_ts = float(event.payload.get("ts", time.monotonic()))
-            except (TypeError, ValueError):
-                pass
         self._status("vad.score", dict(event.payload))
 
     def _on_wake_word(self, event: Event) -> None:
@@ -398,16 +386,9 @@ class VoiceAgentRuntime:
         self._status("wake.detected", {"best": best, "best_name": best_name, "scores": scores})
 
         detected_ts = float(event.payload.get("ts", time.monotonic()))
-        recent_voice = False
-        if self._last_vad_voice_ts is not None:
-            recent_voice = (detected_ts - self._last_vad_voice_ts) <= 0.45
-        if self.vad.speaking or recent_voice:
-            self.logger.info("Wake-word detected during speech; starting LISTENING immediately.")
-            self._begin_listening(detected_ts, reason="wake_word_during_speech")
-            return
-
         self._set_state("ARMED")
         self._armed_since = detected_ts
+        self.vad.reset()
         self.asr.reset()
 
     def _on_vad_start(self, event: Event) -> None:
