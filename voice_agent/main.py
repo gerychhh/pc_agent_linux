@@ -117,6 +117,7 @@ class VoiceAgentRuntime:
         self._last_chunk: Any = None
         self._last_chunk_ts: float = 0.0
         self._armed_since: float | None = None
+        self._wake_words = self._build_wake_words(wake_cfg)
 
         # Components
         self.audio = AudioCapture(
@@ -222,7 +223,7 @@ class VoiceAgentRuntime:
                 self.bus,
             )
 
-        self.intent = IntentRecognizer(nlu_cfg.get("synonyms", {}))
+        self.intent = IntentRecognizer(nlu_cfg.get("synonyms", {}), wake_words=self._wake_words)
         self.actions = ActionExecutor(self.bus)
         self.tts = TtsEngine(
             TtsConfig(
@@ -273,6 +274,49 @@ class VoiceAgentRuntime:
             self.state.name = name
             self.state.since = time.monotonic()
 
+    def _build_wake_words(self, wake_cfg: dict[str, Any]) -> tuple[str, ...]:
+        candidates: list[str] = []
+        for key in ("agent_name", "keyword"):
+            value = wake_cfg.get(key)
+            if value:
+                candidates.append(str(value))
+        for alias in wake_cfg.get("keyword_aliases", []) or []:
+            if alias:
+                candidates.append(str(alias))
+        candidates.extend(["агент", "assistant"])
+        normalized: list[str] = []
+        for item in candidates:
+            token = (item or "").strip().lower()
+            if token and token not in normalized:
+                normalized.append(token)
+        normalized.sort(key=len, reverse=True)
+        return tuple(normalized)
+
+    def _begin_listening(self, ts: float, *, reason: str) -> None:
+        self._armed_since = None
+        self.tts.stop()
+        self.asr.reset()
+        self.asr.speech_start()
+        self._listening_started_at = time.monotonic()
+
+        try:
+            if self._preroll_buf.size:
+                self.asr.accept_audio(self._preroll_buf.copy(), ts)
+        except Exception:
+            pass
+        try:
+            if self._last_chunk is not None:
+                lc = self._last_chunk
+                lc_mono = lc[:, 0] if getattr(lc, "ndim", 1) > 1 else lc
+                if getattr(lc_mono, "dtype", None) != np.int16:
+                    lc_mono = lc_mono.astype(np.int16, copy=False)
+                self.asr.accept_audio(lc_mono, ts)
+        except Exception:
+            pass
+
+        self._set_state("LISTENING")
+        self._status("vad.speech_start", {"ts": ts, "forced": True, "reason": reason})
+
     # --------- event handlers ---------
     def _on_audio(self, event: Event) -> None:
         data = event.payload["data"]
@@ -294,6 +338,7 @@ class VoiceAgentRuntime:
                     self._preroll_buf = self._preroll_buf[-self._preroll_samples :]
 
         if self.state.name == "IDLE":
+            self.vad.process_chunk(data, ts)
             self.wake_word.process_chunk(data, ts)
             return
 
@@ -345,8 +390,14 @@ class VoiceAgentRuntime:
         self.logger.info("Wake-word DETECTED best=%s best_name=%s scores=%s", best, best_name, scores)
         self._status("wake.detected", {"best": best, "best_name": best_name, "scores": scores})
 
+        detected_ts = float(event.payload.get("ts", time.monotonic()))
+        if self.vad.speaking:
+            self.logger.info("Wake-word detected during speech; starting LISTENING immediately.")
+            self._begin_listening(detected_ts, reason="wake_word_during_speech")
+            return
+
         self._set_state("ARMED")
-        self._armed_since = float(event.payload.get("ts", time.monotonic()))
+        self._armed_since = detected_ts
         self.vad.reset()
         self.asr.reset()
 
@@ -354,30 +405,8 @@ class VoiceAgentRuntime:
         # Speech started after wake-word
         if self.state.name not in {"ARMED", "LISTENING"}:
             return
-        self._armed_since = None
-        self.tts.stop()
-
-        self.asr.speech_start()
-        self._listening_started_at = time.monotonic()
-
-        # anti-clipping: feed preroll and the last chunk (that caused speech_start)
-        try:
-            if self._preroll_buf.size:
-                self.asr.accept_audio(self._preroll_buf.copy(), float(event.payload.get("ts", self._last_chunk_ts)))
-        except Exception:
-            pass
-        try:
-            if self._last_chunk is not None:
-                lc = self._last_chunk
-                lc_mono = lc[:, 0] if getattr(lc, "ndim", 1) > 1 else lc
-                if getattr(lc_mono, "dtype", None) != np.int16:
-                    lc_mono = lc_mono.astype(np.int16, copy=False)
-                self.asr.accept_audio(lc_mono, float(event.payload.get("ts", self._last_chunk_ts)))
-        except Exception:
-            pass
-
-        self._set_state("LISTENING")
-        self._status("vad.speech_start", {"ts": event.payload.get("ts")})
+        ts = float(event.payload.get("ts", self._last_chunk_ts))
+        self._begin_listening(ts, reason="vad")
 
     def _on_vad_end(self, event: Event) -> None:
         if self.state.name != "LISTENING":
@@ -398,15 +427,12 @@ class VoiceAgentRuntime:
         self._status("asr.partial", {"text": text})
 
     def _strip_wake_prefix(self, text: str) -> str:
-        agent_name = str(self.cfg.get("wake_word", {}).get("agent_name", "")).strip().lower()
-        if not agent_name:
-            return text
         t = text.strip()
         low = t.lower()
-        # common patterns: "бивис, ..." or "бивис ..."
-        for prefix in [agent_name + ",", agent_name + ":", agent_name]:
-            if low.startswith(prefix):
-                return t[len(prefix):].strip(" ,:.-")
+        for name in self._wake_words:
+            for prefix in (name + ",", name + ":", name):
+                if low.startswith(prefix):
+                    return t[len(prefix):].strip(" ,:.-")
         return t
 
     def _on_final(self, event: Event) -> None:

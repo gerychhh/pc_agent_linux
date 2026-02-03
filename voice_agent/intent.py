@@ -12,9 +12,15 @@ class Intent:
 
 
 class IntentRecognizer:
-    def __init__(self, synonyms: dict[str, str]) -> None:
+    def __init__(self, synonyms: dict[str, str], wake_words: tuple[str, ...] | None = None) -> None:
         self.synonyms = synonyms
-        self._wake_words = ("агент", "assistant")
+        base_wakes = wake_words or ("агент", "assistant")
+        normalized = []
+        for wake in base_wakes:
+            w = (wake or "").strip().lower()
+            if w and w not in normalized:
+                normalized.append(w)
+        self._wake_words = tuple(normalized or ("агент", "assistant"))
         self._patterns = [
             ("open_app", re.compile(r"^(открой|запусти|включи)\s+(?P<app>.+)$")),
             ("close_app", re.compile(r"^(закрой|выключи)\s+(?P<app>.+)$")),

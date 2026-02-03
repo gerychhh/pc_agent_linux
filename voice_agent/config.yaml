@@ -6,6 +6,11 @@ audio:
 wake_word:
   enabled: true
   backend: openwakeword
+  agent_name: "бивис"
+  keyword: "бивис"
+  keyword_aliases:
+  - "бивис"
+  - "beavis"
   model_paths:
   - models/beavis.onnx
   threshold: 0.1
