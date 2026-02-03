@@ -1,0 +1,28 @@
+# Base requirements (cross-platform). Keep this small.
+
+PyYAML>=6.0
+psutil
+numpy
+
+# LLM (choose one):
+openai
+# llama-cpp-python   # optional: for in-process GGUF (LLM_BACKEND=llama_cpp)
+
+# Desktop automation (optional)
+pyautogui
+pillow
+
+# Voice pipeline (optional)
+sounddevice
+vosk
+openwakeword
+onnxruntime
+
+# Optional extras (install only if you use them)
+# opencv-python
+# faster-whisper
+# openai-whisper
+# pyaudio
+# python-docx
+# openpyxl
+# python-pptx

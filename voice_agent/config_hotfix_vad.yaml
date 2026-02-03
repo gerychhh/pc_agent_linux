@@ -1,0 +1,7 @@
+# Hotfix suggestion:
+# Silero VAD needs >=512 samples at 16kHz (~32ms). If your device/capture uses smaller chunks,
+# either raise chunk_ms to 32+ OR keep chunk_ms and rely on VAD buffering (see vad.py hotfix).
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_ms: 32

@@ -1,0 +1,538 @@
+commands:
+- id: CMD_OPEN_URL
+  intents:
+  - открой сайт *
+  - открой url *
+  - open url *
+  - open website *
+  description_short: Открывает ссылку в браузере (xdg-open).
+  params:
+  - name: url
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      url="{{url}}"
+
+      xdg-open "$url" >/dev/null 2>&1 || true
+
+      echo "OK"
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_OPEN_FOLDER
+  intents:
+  - открой папку *
+  - open folder *
+  - open directory *
+  description_short: Открывает папку в файловом менеджере.
+  params:
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      p="{{path}}"
+
+      xdg-open "$p" >/dev/null 2>&1 || true
+
+      echo "OK"
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_LIST_HOME
+  intents:
+  - что в домашней папке
+  - покажи домашнюю папку
+  - list home
+  - ls home
+  description_short: Показывает список файлов в ~.
+  execute:
+    lang: bash
+    script: 'ls -lah ~ | head -n 200
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_FIND_FILE
+  intents:
+  - найди файл *
+  - find file *
+  - search file *
+  - поиск файла *
+  description_short: Ищет файлы по имени в домашней папке (быстро, без sudo).
+  params:
+  - name: name
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      n="{{name}}"
+
+      find ~ -maxdepth 5 -iname "*${n}*" 2>/dev/null | head -n 50
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_LIST_PROCESSES
+  intents:
+  - какие процессы
+  - список процессов
+  - list processes
+  - ps
+  description_short: Показывает топ процессов по CPU.
+  execute:
+    lang: bash
+    script: 'ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -n 25
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_KILL_PROCESS
+  intents:
+  - убей процесс *
+  - закрой процесс *
+  - kill process *
+  description_short: Завершает процесс по имени (pkill -f).
+  params:
+  - name: name
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      n="{{name}}"
+
+      pkill -f "$n" || true
+
+      echo "OK"
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_OPEN_APP
+  intents:
+  - открой приложение *
+  - запусти *
+  - open app *
+  - launch *
+  description_short: Пытается запустить приложение по имени (через gio/gtk-launch/command).
+  params:
+  - name: app
+    from_user: true
+  execute:
+    lang: bash
+    script: "set -e\na=\"{{app}}\"\n\n# common aliases → desktop IDs / flatpak IDs\n\
+      flatpak_id=\"\"\ncase \"$(echo \"$a\" | tr '[:upper:]' '[:lower:]')\" in\n \
+      \ steam) flatpak_id=\"com.valvesoftware.Steam\" ;;\n  discord) flatpak_id=\"\
+      com.discordapp.Discord\" ;;\n  telegram|telegram-desktop) flatpak_id=\"org.telegram.desktop\"\
+      \ ;;\n  spotify) flatpak_id=\"com.spotify.Client\" ;;\nesac\n\n# 1) desktop\
+      \ entry\nif command -v gtk-launch >/dev/null 2>&1; then\n  gtk-launch \"$a\"\
+      \ >/dev/null 2>&1 && echo \"OK\" && exit 0 || true\nfi\n\n# 2) run as command\
+      \ in PATH\nif command -v \"$a\" >/dev/null 2>&1; then\n  (\"$a\" >/dev/null\
+      \ 2>&1 &)\n  echo \"OK\"\n  exit 0\nfi\n\n# 3) flatpak fallback\nif [ -n \"\
+      $flatpak_id\" ] && command -v flatpak >/dev/null 2>&1; then\n  if flatpak info\
+      \ \"$flatpak_id\" >/dev/null 2>&1; then\n    (flatpak run \"$flatpak_id\" >/dev/null\
+      \ 2>&1 &)\n    echo \"OK\"\n    exit 0\n  fi\nfi\n\n# 4) snap fallback\nif command\
+      \ -v snap >/dev/null 2>&1; then\n  if snap list \"$a\" >/dev/null 2>&1; then\n\
+      \    (snap run \"$a\" >/dev/null 2>&1 &)\n    echo \"OK\"\n    exit 0\n  fi\n\
+      fi\n\necho \"App not found: $a\" >&2\nexit 1\n"
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_OPEN_FILE
+  intents:
+  - открой файл *
+  - open file *
+  description_short: Открывает файл через xdg-open.
+  params:
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      p="{{path}}"
+
+      xdg-open "$p" >/dev/null 2>&1 || true
+
+      echo "OK"'
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_SEARCH_WEB
+  intents:
+  - поиск *
+  - найди в интернете *
+  - search web *
+  - google *
+  description_short: Открывает поиск в браузере (Google).
+  params:
+  - name: query
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      q="{{query}}"
+
+      url="$(python3 - "$q" <<''PY''
+
+      import sys, urllib.parse
+
+      q=sys.argv[1]
+
+      print("https://www.google.com/search?q=" + urllib.parse.quote_plus(q))
+
+      PY
+
+      )"
+
+      xdg-open "$url" >/dev/null 2>&1 || true
+
+      echo "OK"
+
+      '
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_DISK_INFO
+  intents:
+  - сколько места на диске
+  - память на диске
+  - disk usage
+  - df
+  description_short: Показывает свободное место и разделы (df/lsblk).
+  execute:
+    lang: bash
+    script: 'df -h | head -n 80
+
+      echo
+
+      lsblk -f | head -n 80'
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_GPU_INFO
+  intents:
+  - покажи gpu
+  - покажи видеокарту
+  - gpu info
+  - nvidia
+  description_short: Показывает информацию о GPU (nvidia-smi если есть).
+  execute:
+    lang: bash
+    script: "if command -v nvidia-smi >/dev/null 2>&1; then\n  nvidia-smi\nelse\n\
+      \  lspci | grep -Ei \"vga|3d|display\" || true\nfi"
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_NET_INFO
+  intents:
+  - сетевые интерфейсы
+  - ip адрес
+  - network info
+  - ip a
+  description_short: Показывает IP/интерфейсы (ip).
+  execute:
+    lang: bash
+    script: 'ip -br a
+
+      ip route | head -n 50'
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_OPEN_CODE
+  intents:
+  - открой в vscode *
+  - open in vscode *
+  - code *
+  description_short: Открывает путь в VS Code (если установлен).
+  params:
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: "set -e\np=\"{{path}}\"\nif command -v code >/dev/null 2>&1; then\n  code\
+      \ \"$p\" >/dev/null 2>&1 || true\nelse\n  xdg-open \"$p\" >/dev/null 2>&1 ||\
+      \ true\nfi\necho \"OK\""
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_GIT_STATUS
+  intents:
+  - git status *
+  - статус гита *
+  - проверь git *
+  description_short: Показывает git status в папке.
+  params:
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      cd "{{path}}"
+
+      git status -sb'
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_GIT_PULL
+  intents:
+  - git pull *
+  - обнови репозиторий *
+  - git update *
+  description_short: git pull --ff-only в папке.
+  params:
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: 'set -e
+
+      cd "{{path}}"
+
+      git pull --ff-only'
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_FIND_TEXT
+  intents:
+  - найди текст * в *
+  - search text * in *
+  - grep * in *
+  description_short: Ищет текст в папке (rg или grep).
+  params:
+  - name: text
+    from_user: true
+  - name: path
+    from_user: true
+  execute:
+    lang: bash
+    script: "set -e\nt=\"{{text}}\"\np=\"{{path}}\"\nif command -v rg >/dev/null 2>&1;\
+      \ then\n  rg --line-number --no-heading --max-columns 200 \"$t\" \"$p\" | head\
+      \ -n 50 || true\nelse\n  grep -RIn --exclude-dir .git -- \"$t\" \"$p\" 2>/dev/null\
+      \ | head -n 50 || true\nfi\necho \"OK\""
+  verify:
+    lang: python
+    script: print('OK')
+  success:
+    type: custom
+- id: CMD_VOLUME_UP
+  intents:
+  - громче
+  - прибавь звук
+  - увеличь громкость
+  - volume up
+  - increase volume
+  - make it louder
+  - звук громче *
+  description_short: Увеличивает громкость (pactl/amixer).
+  params:
+  - name: step
+    from_user: true
+    optional: true
+  execute:
+    lang: bash
+    script: "set -e\nstep=\"{{step}}\"\nstep=\"$(echo \"$step\" | grep -Eo '[0-9]+'\
+      \ | head -n1 || true)\"\nif [ -z \"$step\" ] || ! echo \"$step\" | grep -Eq\
+      \ '^[0-9]+$'; then step=5; fi\nif command -v pactl >/dev/null 2>&1; then\n \
+      \ pactl set-sink-volume @DEFAULT_SINK@ +${step}%\nelif command -v amixer >/dev/null\
+      \ 2>&1; then\n  amixer -D pulse sset Master ${step}%+ >/dev/null\nelse\n  echo\
+      \ \"No pactl/amixer\" >&2; exit 1\nfi\necho \"OK\"\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_VOLUME_DOWN
+  intents:
+  - тише
+  - убавь звук
+  - уменьши громкость
+  - volume down
+  - decrease volume
+  - make it quieter
+  - звук тише *
+  description_short: Уменьшает громкость (pactl/amixer).
+  params:
+  - name: step
+    from_user: true
+    optional: true
+  execute:
+    lang: bash
+    script: "set -e\nstep=\"{{step}}\"\nstep=\"$(echo \"$step\" | grep -Eo '[0-9]+'\
+      \ | head -n1 || true)\"\nif [ -z \"$step\" ] || ! echo \"$step\" | grep -Eq\
+      \ '^[0-9]+$'; then step=5; fi\nif command -v pactl >/dev/null 2>&1; then\n \
+      \ pactl set-sink-volume @DEFAULT_SINK@ -${step}%\nelif command -v amixer >/dev/null\
+      \ 2>&1; then\n  amixer -D pulse sset Master ${step}%- >/dev/null\nelse\n  echo\
+      \ \"No pactl/amixer\" >&2; exit 1\nfi\necho \"OK\"\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_VOLUME_MUTE
+  intents:
+  - выключи звук
+  - mute
+  - mute volume
+  - звук выкл
+  - без звука
+  - поставь на беззвучный
+  - включи звук
+  - unmute
+  description_short: Переключает mute (pactl/amixer).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\nif command -v pactl >/dev/null 2>&1; then\n  pactl set-sink-mute\
+      \ @DEFAULT_SINK@ toggle\nelif command -v amixer >/dev/null 2>&1; then\n  amixer\
+      \ -D pulse sset Master toggle >/dev/null\nelse\n  echo \"No pactl/amixer\" >&2;\
+      \ exit 1\nfi\necho \"OK\"\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_MEDIA_PLAY_PAUSE
+  intents:
+  - пауза
+  - play pause
+  - play/pause
+  - переключи воспроизведение
+  - останови музыку
+  - продолжи музыку
+  description_short: Play/Pause для активного плеера (playerctl).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\nif command -v playerctl >/dev/null 2>&1; then\n  playerctl play-pause\n\
+      \  echo \"OK\"\nelse\n  echo \"playerctl not installed\" >&2\n  exit 1\nfi\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_WIFI_STATUS
+  intents:
+  - вайфай статус
+  - wifi status
+  - статус wifi
+  - интернет статус
+  - wifi on?
+  - wifi off?
+  description_short: Показывает состояние Wi‑Fi (nmcli).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\nif command -v nmcli >/dev/null 2>&1; then\n  nmcli -t -f WIFI\
+      \ g\nelse\n  echo \"nmcli not installed\" >&2; exit 1\nfi\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_WIFI_ON
+  intents:
+  - включи вайфай
+  - wifi on
+  - enable wifi
+  - включи wifi
+  description_short: Включает Wi‑Fi (nmcli).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\nif command -v nmcli >/dev/null 2>&1; then\n  nmcli radio wifi\
+      \ on\n  echo \"OK\"\nelse\n  echo \"nmcli not installed\" >&2; exit 1\nfi\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_WIFI_OFF
+  intents:
+  - выключи вайфай
+  - wifi off
+  - disable wifi
+  - выключи wifi
+  description_short: Выключает Wi‑Fi (nmcli).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\nif command -v nmcli >/dev/null 2>&1; then\n  nmcli radio wifi\
+      \ off\n  echo \"OK\"\nelse\n  echo \"nmcli not installed\" >&2; exit 1\nfi\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom
+- id: CMD_SCREENSHOT_AREA
+  intents:
+  - сделай скриншот
+  - скриншот
+  - screenshot
+  - screenshot area
+  - скрин области
+  - снимок экрана
+  - сделай скрин области
+  description_short: Скриншот выделенной области (flameshot/gnome-screenshot/grim+slurp).
+  params: []
+  execute:
+    lang: bash
+    script: "set -e\ndir=\"$HOME/Pictures/Screenshots\"\nmkdir -p \"$dir\"\nts=\"\
+      $(date +%Y%m%d_%H%M%S)\"\nfile=\"$dir/screen_${ts}.png\"\n\nif command -v flameshot\
+      \ >/dev/null 2>&1; then\n  flameshot gui -p \"$dir\" >/dev/null 2>&1 || true\n\
+      \  echo \"OK\"\n  exit 0\nfi\n\nif command -v gnome-screenshot >/dev/null 2>&1;\
+      \ then\n  gnome-screenshot -a -f \"$file\"\n  echo \"SAVED: $file\"\n  exit\
+      \ 0\nfi\n\nif command -v grim >/dev/null 2>&1 && command -v slurp >/dev/null\
+      \ 2>&1; then\n  grim -g \"$(slurp)\" \"$file\"\n  echo \"SAVED: $file\"\n  exit\
+      \ 0\nfi\n\necho \"No screenshot tool found (flameshot/gnome-screenshot/grim+slurp)\"\
+      \ >&2\nexit 1\n"
+  verify:
+    lang: bash
+    script: 'true'
+  success:
+    type: custom

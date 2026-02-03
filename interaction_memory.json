@@ -1,0 +1,131 @@
+{
+  "routes": {},
+  "actions": {
+    "открой ютуб": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com/'"
+    },
+    "крой ютюб": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com/' &> /dev/null &\necho 'OK'"
+    },
+    "кто ты": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Я - локальный ассистент для управления Linux-ПК.\""
+    },
+    "напиши о себе в активное поле ввода": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Я локальный ассистент для управления Linux-ПК, управляемый Qwen. Мои задачи включают открытие файлов и URL, выполнение простых задач и предоставление информации о системе.\" > /tmp/active_file_info.txt\ncat /tmp/active_file_info.txt"
+    },
+    "температура процессора": {
+      "type": "script",
+      "lang": "bash",
+      "script": "cat /sys/class/thermal/thermal_zone0/temp"
+    },
+    "сверни все вкладки": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"All tabs closed.\""
+    },
+    "что ты умеешь?": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"我能帮助你打开文件、网址、查看进程和GPU信息等。NEED_CONFIRM\""
+    },
+    "что ты": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"I am a local assistant for managing Linux PCs.\""
+    },
+    "кто тебя создал?": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Информация о создателе недоступна через этот интерфейс.\""
+    },
+    "2+2": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo 4"
+    },
+    "12321321 умножить на 3234324": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Result: 39986438912\""
+    },
+    "лабубу": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Неопределенная команда 'лабубу'. Проверьте ввод или используйте доступные команды.\""
+    },
+    "ты как работаешь?": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo 'I am functioning normally.'"
+    },
+    "кто такой трамп": {
+      "type": "script",
+      "lang": "bash",
+      "script": "NEED_CONFIRM: Поиск информации о Трампе может быть сложным задачей без интернета. Проверьте доступность URL: https://www.biography.com/political-figure/donald-trump\nxdg-open 'https://www.biography.com/political-figure/donald-trump'"
+    },
+    "назови случайно число": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo $(( (RANDOM % 100) + 1 ))"
+    },
+    "открой youtube.": {
+      "type": "cmd",
+      "id": "CMD_OPEN_YOUTUBE",
+      "params": {}
+    },
+    "ютуб.": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com/'"
+    },
+    "как дела?": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo \"Привет! Как дела?\" && read -p \"Введи свои дела: \" user_input && echo \"Отлично, я запомнил, что твои дела: $user_input\""
+    },
+    "1+1": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo '2'"
+    },
+    "5*5": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo 25"
+    },
+    "открой вк": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://vk.com'"
+    },
+    "закрой вк": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://vk.com' & disown\necho 'VK tab closed'"
+    },
+    "открой яндекс музыку": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://music.yandex.ru'"
+    },
+    "открой проводник": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open ~"
+    },
+    "открой блокнот": {
+      "type": "cmd",
+      "id": "CMD_OPEN_TEXT_EDITOR",
+      "params": {}
+    }
+  },
+  "history": []
+}

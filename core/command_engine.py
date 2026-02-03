@@ -1,0 +1,478 @@
+from __future__ import annotations
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .config import PROJECT_ROOT, TIMEOUT_SEC
+from .debug import debug_event, truncate_text
+from .executor import run_python, run_shell
+from .state import (
+    add_recent_app,
+    add_recent_file,
+    add_recent_url,
+    set_active_app,
+    set_active_file,
+    set_active_url,
+    update_active_window_state,
+)
+from .validator import validate_python, validate_bash
+
+
+_LINUX_LIBRARY = PROJECT_ROOT / "core" / "command_library_linux.yaml"
+
+
+def _get_command_library_path() -> Path:
+    # Linux-only
+    return _LINUX_LIBRARY
+
+
+
+def _load_yaml_commands(path: Path) -> list[dict[str, Any]]:
+    """Load YAML command list from file.
+
+    Resilient by design:
+    - missing file -> []
+    - invalid YAML -> [] (and logs a debug event), so the app can still start
+    """
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+    except Exception as e:
+        debug_event("CMD_YAML_ERR", f"{path}: {e}")
+        return []
+
+    if isinstance(data, dict) and "commands" in data:
+        return list(data["commands"] or [])
+    if isinstance(data, list):
+        return list(data)
+    return []
+
+@dataclass
+class Action:
+    language: str
+    script: str
+    updates: dict[str, Any] | None = None
+    name: str | None = None
+
+
+@dataclass
+class CommandMatch:
+    command: dict[str, Any]
+    params: dict[str, str]
+    score: int
+    intent: str
+    reason: str
+
+
+@dataclass
+class ExecResult:
+    ok: bool
+    stdout: str | None
+    stderr: str | None
+    returncode: int | None
+    duration_ms: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class CommandResult:
+    action: Action
+    execute_result: ExecResult
+    verify_result: ExecResult | None
+    ok: bool
+
+    @property
+    def stdout(self) -> str:
+        return (self.execute_result.stdout or "")
+
+    @property
+    def stderr(self) -> str:
+        return (self.execute_result.stderr or "")
+
+    @property
+    def verified(self) -> bool:
+        if self.verify_result is None:
+            return True
+        return bool(self.verify_result.ok)
+
+    @property
+    def verify_reason(self) -> str | None:
+        if self.verify_result is None:
+            return None
+        if self.verify_result.ok:
+            return None
+        s = (self.verify_result.stderr or "").strip()
+        return s or "verify_failed"
+
+    @property
+    def duration_ms(self) -> int:
+        return int(self.execute_result.duration_ms or 0)
+
+    def to_text(self) -> str:
+        """Human-friendly output for UI/chat.
+
+        Priority:
+          1) stdout from execute
+          2) stderr / error messages
+          3) a small fallback description
+        """
+        out = (self.execute_result.stdout or "").strip()
+        if out:
+            return out
+        err = (self.execute_result.stderr or self.execute_result.error or "").strip()
+        if err:
+            return err
+        # If verify failed, expose why
+        if not self.verified:
+            reason = (self.verify_reason or "verify_failed").strip()
+            return reason
+        # last resort
+        name = self.action.name or self.action.language or "command"
+        return f"{name}: ok"
+
+
+def load_commands() -> list[dict[str, Any]]:
+    """Load command library.
+
+    Order:
+      1) core/command_library_linux.yaml (tracked)
+      2) core/command_library_user.yaml (local overrides/additions; optional)
+      3) core/command_library.d/*.yml|*.yaml (optional fragments)
+
+    If multiple commands share the same `id`, the last one wins (user overrides linux).
+    """
+    base = _get_command_library_path()
+    cmds: list[dict[str, Any]] = []
+    cmds += _load_yaml_commands(base)
+    cmds += _load_yaml_commands(base.with_name("command_library_user.yaml"))
+
+    d = base.with_name("command_library.d")
+    if d.exists() and d.is_dir():
+        for p in sorted(list(d.glob("*.yml")) + list(d.glob("*.yaml"))):
+            cmds += _load_yaml_commands(p)
+
+    # de-dup by id while keeping order (last wins)
+    seen: dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    for c in cmds:
+        cid = str(c.get("id") or "")
+        if not cid:
+            out.append(c)
+            continue
+        if cid in seen:
+            out[seen[cid]] = c
+        else:
+            seen[cid] = len(out)
+            out.append(c)
+    return out
+
+
+def match_command(user_text: str, commands: list[dict[str, Any]]) -> tuple[CommandMatch | None, list[CommandMatch]]:
+    normalized = _normalize_text(user_text)
+    matches: list[CommandMatch] = []
+    for command in commands:
+        for intent in command.get("intents") or []:
+            intent_text = str(intent)
+            score, reason = _match_intent(intent_text, normalized)
+            if score == 0:
+                continue
+            params = extract_params(command, user_text, intent_text)
+            matches.append(
+                CommandMatch(
+                    command=command,
+                    params=params,
+                    score=score,
+                    intent=intent_text,
+                    reason=reason,
+                )
+            )
+    matches.sort(key=lambda m: m.score, reverse=True)
+    best = matches[0] if matches else None
+    if best and best.command.get("id") == "CMD_OPEN_APP_SEARCH":
+        for candidate in matches[1:]:
+            if candidate.command.get("id") != "CMD_OPEN_APP_SEARCH" and candidate.score >= 2:
+                best = candidate
+                break
+    debug_event("CMD_MATCH", f"matches={len(matches)} best={best.command.get('id') if best else 'NONE'}")
+    for match in matches[:5]:
+        debug_event(
+            "CMD_MATCH",
+            f"{match.command.get('id')} score={match.score} intent='{match.intent}' reason={match.reason}",
+        )
+    return best, matches
+
+
+def render_template(script: str, params: dict[str, str]) -> str:
+    rendered = script
+    for key, value in params.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", str(value))
+    return rendered
+
+
+def render_updates(updates: dict[str, Any] | None, params: dict[str, str]) -> dict[str, Any] | None:
+    if not updates:
+        return updates
+    rendered: dict[str, Any] = {}
+    desktop_path = str(Path.home() / "Desktop")
+    for key, value in updates.items():
+        if isinstance(value, str):
+            value = value.replace("{{desktop}}", desktop_path)
+            for param_key, param_value in params.items():
+                value = value.replace(f"{{{{{param_key}}}}}", str(param_value))
+        rendered[key] = value
+    return rendered
+
+
+def run_command(command: dict[str, Any], params: dict[str, str]) -> CommandResult:
+    execute = command.get("execute") or {}
+    verify = command.get("verify") or {}
+    action = Action(
+        language=execute.get("lang"),
+        script=render_template(execute.get("script") or "", params),
+        updates=render_updates(command.get("state_update"), params),
+        name=command.get("id"),
+    )
+
+    exec_result = _run_action(action)
+    verify_result: ExecResult | None = None
+    ok = exec_result.ok
+
+    if verify:
+        verify_action = Action(
+            language=verify.get("lang"),
+            script=render_template(verify.get("script") or "", params),
+        )
+        debug_event("VERIFY", f"script={truncate_text(verify_action.script, 200)}")
+        verify_result = _run_action(verify_action)
+        debug_event(
+            "VERIFY",
+            f"ok={verify_result.ok} stdout={truncate_text(verify_result.stdout or '', 200)} stderr={truncate_text(verify_result.stderr or '', 200)}",
+        )
+        ok = ok and verify_result.ok
+
+    if ok and action.updates:
+        _apply_state_updates(action.updates)
+
+    update_active_window_state()
+
+    return CommandResult(action=action, execute_result=exec_result, verify_result=verify_result, ok=ok)
+
+
+def run_verify(verify: dict[str, Any], params: dict[str, str]) -> ExecResult:
+    action = Action(language=verify.get("lang"), script=render_template(verify.get("script") or "", params))
+    return _run_action(action)
+
+
+def extract_params(command: dict[str, Any], user_text: str, intent_text: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    spec = command.get("params") or []
+    wildcard_value = _extract_wildcard(intent_text, user_text)
+
+    for item in spec:
+        name = item.get("name")
+        default = item.get("default")
+        from_user = item.get("from_user", False)
+        if name == "app_name":
+            extracted_app = _extract_app_name(user_text)
+            if extracted_app:
+                params[name] = extracted_app
+                continue
+        if name == "query":
+            extracted_query = _extract_query(user_text)
+            if extracted_query:
+                params[name] = extracted_query
+                continue
+        if name == "app":
+            if wildcard_value:
+                params[name] = wildcard_value
+                continue
+        if name == "filename":
+            extracted_name = _extract_filename(user_text)
+            if extracted_name:
+                params[name] = extracted_name
+                continue
+        if from_user and name in {"text", "content"}:
+            extracted = _extract_after_keywords(user_text)
+            if extracted:
+                params[name] = extracted
+                continue
+        if from_user and wildcard_value:
+            params[name] = wildcard_value
+        elif from_user:
+            params[name] = _extract_after_keywords(user_text) or default or ""
+        else:
+            params[name] = default or ""
+
+    if "query" in params:
+        params["query"] = params["query"].strip()
+    if "app" in params:
+        params["app"] = params["app"].strip()
+    if "text" in params:
+        params["text"] = params["text"].strip()
+    if "content" in params:
+        params["content"] = params["content"].strip()
+    if "filename" in params:
+        params["filename"] = _sanitize_filename(params["filename"], _guess_extension(command))
+
+    return params
+
+
+def extract_params_best(command: dict[str, Any], user_text: str) -> dict[str, str]:
+    best_params: dict[str, str] = {}
+    best_score = 0
+    for intent in command.get("intents") or []:
+        intent_text = str(intent)
+        score, _reason = _match_intent(intent_text, user_text.lower())
+        if score > best_score:
+            best_score = score
+            best_params = extract_params(command, user_text, intent_text)
+    if best_params:
+        return best_params
+    fallback_params = extract_params(command, user_text, "")
+    if fallback_params:
+        return fallback_params
+    fallback_params = {}
+    query = _extract_query(user_text)
+    text_value = _extract_after_keywords(user_text)
+    if query:
+        fallback_params["query"] = query
+    if text_value:
+        fallback_params["text"] = text_value
+    return fallback_params
+
+
+def _run_action(action: Action) -> ExecResult:
+    if not action.language or not action.script:
+        return ExecResult(ok=False, stdout="", stderr="empty action", returncode=1, error="invalid")
+    lang = (action.language or "").lower().strip()
+    debug_event("EXEC", f"lang={lang} script={truncate_text(action.script, 200)}")
+    validation = _validate_script(lang, action.script)
+    if validation:
+        reason = "; ".join(validation)
+        debug_event("VALIDATE", f"blocked: {reason}")
+        return ExecResult(ok=False, stdout="", stderr=reason, returncode=1, error="blocked")
+    debug_event("VALIDATE", "allowed")
+
+    if lang == "python":
+        result = run_python(action.script, TIMEOUT_SEC)
+    elif lang in {"bash", "sh", "shell"}:
+        result = run_shell(action.script, TIMEOUT_SEC)
+    else:
+        result = run_shell(action.script, TIMEOUT_SEC)
+
+    debug_event(
+        "EXEC",
+        f"returncode={result.get('returncode')} stdout={truncate_text(result.get('stdout') or '', 2000)} stderr={truncate_text(result.get('stderr') or '', 2000)}",
+    )
+    return ExecResult(
+        ok=bool(result.get("ok")),
+        stdout=result.get("stdout"),
+        stderr=result.get("stderr"),
+        returncode=result.get("returncode"),
+        duration_ms=result.get("duration_ms"),
+    )
+
+
+def _apply_state_updates(updates: dict[str, Any]) -> None:
+    if "active_url" in updates:
+        url = updates["active_url"]
+        set_active_url(url)
+        add_recent_url(url)
+    if "active_app" in updates:
+        app = updates["active_app"]
+        set_active_app(app)
+        add_recent_app(app)
+    if "active_file" in updates:
+        path = updates["active_file"]
+        set_active_file(path)
+        add_recent_file(path)
+
+
+def _validate_script(language: str, script: str) -> list[str]:
+    if language == "python":
+        return validate_python(script)
+    if language in {"bash", "sh", "shell"}:
+        from .validator import validate_bash
+
+        return validate_bash(script)
+    return validate_bash(script)
+
+
+def _normalize_text(text: str) -> str:
+    return text.lower().strip()
+
+
+def _match_intent(intent: str, text: str) -> tuple[int, str]:
+    intent_lower = intent.lower().strip()
+    if "*" in intent_lower:
+        pattern = re.escape(intent_lower).replace("\\*", "(.+)")
+        if re.search(pattern, text, re.IGNORECASE):
+            return 3, "wildcard"
+        return 0, ""
+    if intent_lower in text:
+        return 2, "substring"
+    return 0, ""
+
+
+def _extract_wildcard(intent: str, user_text: str) -> str | None:
+    intent_lower = intent.lower().strip()
+    if "*" not in intent_lower:
+        return None
+    pattern = re.escape(intent_lower).replace("\\*", "(.+)")
+    match = re.search(pattern, user_text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_after_keywords(text: str) -> str | None:
+    match = re.search(r"(?:текст|содержимое|впиши|напиши)\s*[:\-]?\s*(.+)$", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_app_name(text: str) -> str | None:
+    match = re.search(r"(?:открой|запусти|включи)\s+(.+)$", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_query(text: str) -> str | None:
+    match = re.search(
+        r"(?:найди(?:\s+на\s+\w+)?|поиск|погугли)\s+(.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_filename(text: str) -> str | None:
+    match = re.search(r"(\\S+\\.(?:txt|md|json|docx))", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _sanitize_filename(filename: str, extension: str | None) -> str:
+    clean = re.sub(r"[^\w\-\.а-яА-Я]", "_", filename)
+    if extension and not clean.lower().endswith(extension):
+        clean = f"{clean}{extension}"
+    return clean
+
+
+def _guess_extension(command: dict[str, Any]) -> str | None:
+    cmd_id = (command.get("id") or "").lower()
+    if "txt" in cmd_id:
+        return ".txt"
+    if "docx" in cmd_id:
+        return ".docx"
+    return None

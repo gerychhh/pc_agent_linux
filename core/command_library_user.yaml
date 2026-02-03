@@ -1,0 +1,67 @@
+# User overrides for Wayland-safe behavior
+
+- id: CMD_TYPE_TEXT_ACTIVE
+  intents:
+    - "напиши *"
+    - "впиши *"
+    - "вставь *"
+    - "напечатай *"
+    - "text *"
+  params:
+    - name: text
+      from_user: true
+  execute:
+    lang: bash
+    script: |
+      if command -v wl-copy >/dev/null 2>&1; then
+        cat <<'__PASTE_TEXT__' | wl-copy
+      {{text}}
+      __PASTE_TEXT__
+        echo "PASTE"
+      elif command -v xclip >/dev/null 2>&1; then
+        cat <<'__PASTE_TEXT__' | xclip -selection clipboard
+      {{text}}
+      __PASTE_TEXT__
+        echo "PASTE"
+      else
+        echo "Need clipboard tool: wl-copy (wl-clipboard) or xclip."
+        echo "Install (run manually):"
+        echo "  sudo apt update && sudo apt install -y wl-clipboard"
+        echo "NEED_CONFIRM"
+      fi
+
+- id: CMD_OPEN_TEXT_EDITOR
+  intents:
+    - "открой блокнот"
+    - "открой текстовый редактор"
+    - "открой редактор"
+    - "open notepad"
+  execute:
+    lang: bash
+    script: |
+      if command -v gnome-text-editor >/dev/null 2>&1; then
+        gnome-text-editor & disown
+        echo "OK"
+      elif command -v gedit >/dev/null 2>&1; then
+        gedit & disown
+        echo "OK"
+      elif command -v kate >/dev/null 2>&1; then
+        kate & disown
+        echo "OK"
+      else
+        xdg-open . &>/dev/null & disown
+        echo "OK"
+      fi
+
+- id: CMD_SHOW_DESKTOP
+  intents:
+    - "покажи рабочий стол"
+    - "сверни все окна"
+    - "сверни всё"
+    - "show desktop"
+  execute:
+    lang: bash
+    script: |
+      echo "Wayland: cannot reliably control windows via CLI."
+      echo "Press: Super + D (Show Desktop)"
+      echo "NEED_CONFIRM"

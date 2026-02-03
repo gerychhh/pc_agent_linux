@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# LLM backend settings
+#
+# By default the project used LM Studio (OpenAI-compatible server). For Linux + "no extra UI software",
+# we support two modes:
+#   1) openai_compatible (default): any OpenAI-compatible endpoint (llama.cpp server, vLLM, etc.)
+#   2) llama_cpp: in-process GGUF model via llama-cpp-python
+LLM_BACKEND = os.getenv("LLM_BACKEND", "openai_compatible").lower()
+
+# OpenAI-compatible endpoint (only used when LLM_BACKEND=openai_compatible)
+BASE_URL = os.getenv("OPENAI_BASE_URL", os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"))
+API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("LMSTUDIO_API_KEY", "not-needed"))
+
+# In-process GGUF model path (only used when LLM_BACKEND=llama_cpp)
+LLM_MODEL_PATH = os.getenv("LLM_MODEL_PATH", "")
+LLM_CTX = int(os.getenv("LLM_CTX", "4096"))
+LLM_THREADS = int(os.getenv("LLM_THREADS", "0"))
+LLM_GPU_LAYERS = int(os.getenv("LLM_GPU_LAYERS", "0"))
+FAST_MODEL = os.getenv("FAST_MODEL", "")
+
+MODE = "script"
+DEBUG = os.getenv("DEBUG") == "1"
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+TIMEOUT_SEC = 30
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOG_DIR = PROJECT_ROOT / "logs"
+SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+VOICE_DEFAULT_ENABLED = os.getenv("VOICE", "1") == "1"
+VOICE_ENGINE = os.getenv("VOICE_ENGINE", "whisper").lower()
+VOSK_MODEL_SIZE = os.getenv("VOSK_MODEL_SIZE", "full").lower()
+_VOSK_MODEL_NAME = "vosk-model-small-ru-0.22" if VOSK_MODEL_SIZE == "small" else "vosk-model-ru-0.22"
+VOSK_MODEL_DIR = Path(os.getenv("VOSK_MODEL_DIR", PROJECT_ROOT / "models" / _VOSK_MODEL_NAME))
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small").lower()
+WHISPER_MODEL_NAME = os.getenv(
+    "WHISPER_MODEL_NAME",
+    "small" if WHISPER_MODEL_SIZE == "small" else "base",
+)
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda").lower()
+VOICE_SAMPLE_RATE = int(os.getenv("VOICE_SAMPLE_RATE", "16000"))
+VOICE_DEVICE = os.getenv("VOICE_DEVICE")
+VOICE_NAME = os.getenv("VOICE_NAME", "Microsoft Dmitry")
+VOICE_RATE = int(os.getenv("VOICE_RATE", "2"))
+VOICE_VOLUME = int(os.getenv("VOICE_VOLUME", "100"))
+
+WAKE_NAME = os.getenv("WAKE_NAME", "Бивис")
+WAKE_MODE = os.getenv("WAKE_MODE", "gated_vosk").lower()
+# WAKE_MODE: "prefix" (как сейчас), "gated_vosk" (рекомендуется), "off"
+
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

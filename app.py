@@ -1,0 +1,754 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader (no external deps)."""
+    try:
+        text = path.read_text(encoding='utf-8')
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+_load_dotenv(Path(__file__).with_name('.env'))
+from typing import Any
+
+import sounddevice as sd
+
+from core.config import (
+    SCREENSHOT_DIR,
+    VOICE_DEFAULT_ENABLED,
+    VOICE_ENGINE,
+    VOICE_NAME,
+    VOICE_RATE,
+    VOICE_VOLUME,
+    VOSK_MODEL_SIZE,
+    WHISPER_MODEL_SIZE,
+)
+from core.orchestrator import Orchestrator, sanitize_assistant_text
+from core.debug import set_debug
+from voice_agent.main import VoiceAgentRuntime
+from core.state import (
+    get_assistant_name,
+    set_assistant_name,
+
+    clear_state,
+    get_active_app,
+    get_active_file,
+    get_active_url,
+    get_voice_engine,
+    get_voice_model_size,
+    get_voice_device,
+    load_state,
+    set_active_file,
+    set_voice_engine,
+    set_voice_model_size,
+    set_voice_device,
+)
+from core.interaction_memory import find_similar_routes, get_route, record_history, set_route
+from core.llm_client import LLMClient
+from core.config import FAST_MODEL
+
+
+HELP_TEXT = """
+Commands:
+  /help    Show this help message
+  /exit    Exit the application
+  /reset   Reset conversation context
+  /debug   Toggle debug logging
+  /screens List recent screenshots
+  /active  Show current active file/url/app
+  /files   List recent files
+  /urls    List recent URLs
+  /apps    List recent apps
+  /use     Set active file by index or path
+  /clear   Clear active state
+  /voice models        List voice recognition models
+  /voice model <engine> <size>  Set voice model (vosk/whisper + small/full)
+""".strip()
+
+
+class InputManager:
+    """Collects text input (stdin) and voice input (wake-word pipeline).
+
+    Voice pipeline uses voice_agent.main.VoiceAgentRuntime:
+      wake-word -> silero VAD -> ASR (whisper/vosk) -> final text
+    """
+
+    def __init__(self, voice_enabled: bool) -> None:
+        self.text_queue: queue.Queue[str | None] = queue.Queue()
+        self.voice_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+        self._text_thread = threading.Thread(target=self._text_loop, daemon=True)
+        self._text_thread.start()
+
+        self._voice_thread: threading.Thread | None = None
+        self._voice_stop = threading.Event()
+        self._voice_pause = threading.Event()
+
+        self.voice_enabled = False
+        self.voice_runtime: VoiceAgentRuntime | None = None
+        self.voice_config_path = Path(__file__).resolve().parent / "voice_agent" / "config.yaml"
+
+        self._last_wake_print = 0.0
+        self.set_voice_enabled(voice_enabled)
+
+    def _text_loop(self) -> None:
+        while True:
+            try:
+                line = input()
+            except (EOFError, KeyboardInterrupt):
+                self.text_queue.put(None)
+                break
+            self.text_queue.put(line)
+
+    def _voice_loop(self) -> None:
+        """Starts VoiceAgentRuntime once and relays events into voice_queue."""
+        def on_final(text: str) -> None:
+            if text and not self._voice_stop.is_set():
+                self.voice_queue.put({"type": "voice", "text": text})
+
+        def on_status(kind: str, payload: dict[str, Any]) -> None:
+            # Throttle wake.scores spam a bit
+            if kind == "wake.scores":
+                now = time.monotonic()
+                if now - self._last_wake_print < 0.35:
+                    return
+                self._last_wake_print = now
+            self.voice_queue.put({"type": "voice_status", "kind": kind, "payload": payload})
+
+        try:
+            self.voice_runtime = VoiceAgentRuntime(
+                self.voice_config_path,
+                on_final=on_final,
+                on_status=on_status,
+                enable_actions=False,
+            )
+            self.voice_runtime.start()
+            self.voice_queue.put({"type": "voice_status", "kind": "runtime.started", "payload": {"config": str(self.voice_config_path)}})
+        except Exception as exc:
+            self.voice_queue.put({"type": "voice_error", "error": str(exc)})
+            return
+
+        while not self._voice_stop.is_set():
+            if self._voice_pause.is_set() and self.voice_runtime:
+                self.voice_runtime.set_muted(True)
+            elif self.voice_runtime:
+                self.voice_runtime.set_muted(False)
+            time.sleep(0.2)
+
+        # stopping
+        try:
+            if self.voice_runtime:
+                self.voice_runtime.stop()
+        except Exception:
+            pass
+        self.voice_runtime = None
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        if enabled and not self.voice_enabled:
+            self._voice_stop.clear()
+            self._voice_pause.clear()
+            self.voice_enabled = True
+            self._voice_thread = threading.Thread(target=self._voice_loop, daemon=True)
+            self._voice_thread.start()
+        elif not enabled and self.voice_enabled:
+            self._voice_stop.set()
+            self.voice_enabled = False
+            self.voice_runtime = None
+            self._voice_thread = None
+
+    def pause_voice(self, paused: bool) -> None:
+        if paused:
+            self._voice_pause.set()
+        else:
+            self._voice_pause.clear()
+
+    def reset_voice_input(self) -> None:
+        # Force restart runtime
+        if self.voice_enabled:
+            self.set_voice_enabled(False)
+            self.set_voice_enabled(True)
+
+    def get_event(self, timeout: float = 0.1) -> dict[str, Any] | None:
+        try:
+            event = self.voice_queue.get_nowait()
+            return event
+        except queue.Empty:
+            pass
+        try:
+            line = self.text_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if line is None:
+            return {"type": "eof"}
+        return {"type": "text", "text": line}
+
+
+
+
+@dataclass
+class PendingTask:
+    original_query: str
+    resolved_query: str
+    force_llm: bool
+    thread: threading.Thread
+    queue: queue.Queue[dict[str, str]]
+    cancel: threading.Event
+
+
+def list_screenshots() -> None:
+    screenshots = sorted(SCREENSHOT_DIR.glob("*.png"), key=os.path.getmtime, reverse=True)
+    if not screenshots:
+        print("No screenshots yet.")
+        return
+    print("Recent screenshots:")
+    for shot in screenshots[:10]:
+        print(f" - {shot}")
+
+
+def _print_recent(label: str, items: list[str]) -> None:
+    if not items:
+        print(f"No {label}.")
+        return
+    print(f"Recent {label}:")
+    for idx, item in enumerate(items[:10], start=1):
+        print(f"{idx}. {item}")
+
+
+
+def _print_voice_status(kind: str, payload: dict[str, Any]) -> None:
+    # Human-readable voice pipeline logs for app.py
+    if kind == "state":
+        print(f"[VOICE][STATE] {payload.get('from')} -> {payload.get('to')}")
+        return
+    if kind == "wake.scores":
+        best = payload.get("best", 0.0)
+        best_name = payload.get("best_name", "")
+        timeline = payload.get("timeline", "")
+        print(f"[VOICE][WAKE] {best_name}={best:.2f}  {timeline}")
+        return
+    if kind == "wake.detected":
+        print(f"[VOICE][WAKE] DETECTED {payload.get('best_name')} score={payload.get('best')}")
+        return
+    if kind == "vad.score":
+        print(f"[VOICE][VAD] prob={payload.get('prob', 0.0):.2f} speaking={'YES' if payload.get('speaking') else 'no'}")
+        return
+    if kind == "vad.speech_start":
+        print("[VOICE][VAD] speech_start")
+        return
+    if kind == "vad.speech_end":
+        print("[VOICE][VAD] speech_end -> decoding")
+        return
+    if kind == "asr.final":
+        print(f"[VOICE][ASR] FINAL: {payload.get('text','')}")
+        return
+    if kind == "asr.timeout":
+        print(f"[VOICE][ASR] timeout: {payload}")
+        return
+    if kind in {"runtime.started", "runtime.stopped"}:
+        print(f"[VOICE] {kind}: {payload}")
+        return
+def _handle_debug_command(raw: str) -> None:
+    parts = raw.split()
+    if len(parts) == 1:
+        set_debug(True)
+        print("Debug enabled.")
+        return
+    if parts[1].lower() in ("off", "0", "false"):
+        set_debug(False)
+        print("Debug disabled.")
+        return
+    set_debug(True)
+    print("Debug enabled.")
+
+
+def _parse_cancel(text: str) -> bool:
+    normalized = text.strip().lower()
+    return normalized in {
+        "отмена",
+        "откажись",
+        "забудь",
+        "не надо",
+        "стоп",
+        "стопит",
+        "остановись",
+        "остановить",
+        "стой",
+        "хватит",
+    }
+
+
+def _resolve_request(user_text: str) -> tuple[str, bool]:
+    """Resolve short-hands via interaction memory.
+
+    Simplicity: we do NOT run a separate LLM classifier here.
+    Orchestrator already tries the predefined command library first, then LLM fallback.
+    """
+    similar = find_similar_routes(user_text, limit=3)
+    if similar and similar[0]["score"] >= 0.92:
+        return similar[0]["resolved"], False
+    return user_text, False
+
+
+def _format_prompt(text: str) -> str:
+    return text if text.endswith(" ") else f"{text} "
+
+
+def _extract_voice_command(text: str, wake_name: str | None) -> str | None:
+    if not wake_name:
+        return text
+    wake = wake_name.strip().lower()
+    if not wake:
+        return text
+    normalized = text.strip().lower()
+    prefixes = (wake, f"эй {wake}", f"hey {wake}")
+    for prefix in prefixes:
+        if normalized == prefix:
+            return ""
+        if normalized.startswith(prefix):
+            remainder = text[len(prefix) :].lstrip(" ,.!?:;—-")
+            return remainder
+    return text
+
+
+def _is_garbage_voice(text: str) -> bool:
+    trimmed = text.strip().lower()
+    if len(trimmed) < 3:
+        return True
+    parts = trimmed.split()
+    if len(parts) == 1:
+        filler = {
+            "ээ",
+            "эм",
+            "мм",
+            "угу",
+            "ага",
+            "ну",
+            "да",
+            "нет",
+            "ок",
+            "окей",
+            "okay",
+            "хм",
+        }
+        if parts[0] in filler:
+            return True
+    return False
+
+
+def speak_text(text: str) -> None:
+    """Best-effort TTS.
+
+    On Linux we try (in order): spd-say, espeak/espeak-ng.
+    If nothing is available – do nothing.
+    """
+    import shutil
+    import subprocess
+
+    t = (text or "").strip()
+    if not t:
+        return
+
+    candidates = []
+    if shutil.which("spd-say"):
+        candidates.append(["spd-say", t])
+    if shutil.which("espeak-ng"):
+        candidates.append(["espeak-ng", t])
+    if shutil.which("espeak"):
+        candidates.append(["espeak", t])
+
+    for cmd in candidates:
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            continue
+
+
+
+def main() -> None:
+    print("PC Agent CLI. Type /help for commands.")
+    print("Tip: включить голосовой ввод → /voice on (и проверь микрофон: /voice devices)")
+    voice_wake_name = (os.getenv("WAKE_NAME") or get_assistant_name() or "Бивис").strip()
+    set_assistant_name(voice_wake_name)
+
+    set_debug(os.getenv("PC_AGENT_DEBUG", "0") == "1")
+    orchestrator = Orchestrator()
+    voice_enabled = VOICE_DEFAULT_ENABLED
+    input_manager = InputManager(voice_enabled)
+    if get_voice_engine() is None:
+        set_voice_engine(VOICE_ENGINE)
+    if get_voice_model_size() is None:
+        default_size = WHISPER_MODEL_SIZE if VOICE_ENGINE == "whisper" else VOSK_MODEL_SIZE
+        set_voice_model_size(default_size)
+    prompt_state = "command"
+    prompt_shown = False
+    prompt_spoken = False
+    last_prompt_key: str | None = None
+    pending_task: PendingTask | None = None
+    queued_command: str | None = None
+
+    def show_prompt(text: str, speak: bool = False) -> None:
+        nonlocal prompt_shown, prompt_spoken, last_prompt_key
+        prompt_key = f"{text}|{speak}"
+        if prompt_shown and last_prompt_key == prompt_key:
+            return
+        print(_format_prompt(text), end="", flush=True)
+        prompt_shown = True
+        last_prompt_key = prompt_key
+        if speak and voice_enabled and not prompt_spoken:
+            try:
+                speak_out(text.rstrip())
+            except Exception:
+                pass
+            prompt_spoken = True
+
+    def speak_out(text: str) -> None:
+        if not voice_enabled:
+            return
+        input_manager.pause_voice(True)
+        try:
+            speak_text(text)
+        finally:
+            input_manager.pause_voice(False)
+
+    def start_task(original_query: str, resolved_query: str, force_llm: bool) -> None:
+        nonlocal pending_task
+        result_queue: queue.Queue[dict[str, str]] = queue.Queue()
+        cancel_event = threading.Event()
+
+        def runner() -> None:
+            try:
+                response_text = orchestrator.run(resolved_query, stateless=voice_enabled, force_llm=force_llm)
+                result_queue.put({"type": "result", "response": response_text})
+            except Exception as exc:
+                result_queue.put({"type": "error", "error": str(exc)})
+
+        thread = threading.Thread(target=runner, daemon=True)
+        pending_task = PendingTask(
+            original_query=original_query,
+            resolved_query=resolved_query,
+            force_llm=force_llm,
+            thread=thread,
+            queue=result_queue,
+            cancel=cancel_event,
+        )
+        thread.start()
+
+    while True:
+        if pending_task:
+            task_queue = pending_task.queue
+            try:
+                task_result = task_queue.get_nowait()
+            except queue.Empty:
+                task_result = None
+            if task_result:
+                if pending_task.cancel.is_set():
+                    pending_task = None
+                    prompt_state = "command"
+                    prompt_shown = False
+                    prompt_spoken = False
+                else:
+                    if task_result["type"] == "error":
+                        output = task_result["error"]
+                    else:
+                        output = sanitize_assistant_text(task_result["response"])
+                    if not output:
+                        output = "(no output)"
+                    print(f"Agent> {output}")
+                    record_history(pending_task.original_query, output, pending_task.resolved_query)
+                    if voice_enabled:
+                        try:
+                            speak_out("Готово")
+                        except Exception:
+                            pass
+                    pending_task = None
+                    prompt_state = "command"
+                    prompt_shown = False
+                    prompt_spoken = False
+                continue
+
+        if queued_command and not pending_task and prompt_state == "command":
+            user_input = queued_command
+            queued_command = None
+        else:
+            if not prompt_shown:
+                if prompt_state == "command":
+                    show_prompt("You>", speak=False)
+
+            event = input_manager.get_event(timeout=0.1)
+            if event is None:
+                continue
+            if event["type"] == "eof":
+                print("\nExiting.")
+                break
+            if event["type"] == "voice_error":
+                print(f"Voice error: {event.get('error', '')}")
+                input_manager.set_voice_enabled(False)
+                voice_enabled = False
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            if event["type"] == "voice_status":
+                _print_voice_status(str(event.get("kind","")), event.get("payload", {}) or {})
+                continue
+            if event["type"] == "voice":
+                voice_text = event.get("text", "")
+                if _is_garbage_voice(voice_text):
+                    print("Не расслышал, повтори.")
+                    prompt_shown = False
+                    prompt_spoken = False
+                    continue
+                normalized = voice_text.strip().lower()
+                if normalized in {"выключи голос", "voice off"}:
+                    voice_enabled = False
+                    input_manager.set_voice_enabled(False)
+                    print("Voice mode disabled.")
+                    prompt_shown = False
+                    prompt_spoken = False
+                    continue
+                if _parse_cancel(voice_text):
+                    user_input = voice_text.strip()
+                    print(f"You(voice)> {user_input}")
+                else:
+                    command = _extract_voice_command(voice_text, voice_wake_name)
+                    if command is None:
+                        prompt_shown = False
+                        prompt_spoken = False
+                        continue
+                    if not command:
+                        if pending_task:
+                            pending_task.cancel.set()
+                            pending_task = None
+                        print("Да, слушаю.")
+                        prompt_shown = False
+                        prompt_spoken = False
+                        continue
+                    print(f"You(voice)> {command}")
+                    user_input = command
+            else:
+                user_input = event.get("text", "").strip()
+
+        if not user_input:
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+
+        if _parse_cancel(user_input):
+            if pending_task:
+                pending_task.cancel.set()
+            pending_task = None
+            prompt_state = "command"
+            queued_command = None
+            print("Остановлено.")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+
+        if pending_task:
+            queued_command = user_input
+            pending_task.cancel.set()
+            print("Остановлено.")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+
+
+        if user_input == "/help":
+            print(HELP_TEXT)
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/exit":
+            print("Goodbye.")
+            break
+        if user_input == "/reset":
+            orchestrator.reset()
+            print("Context reset.")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input.startswith("/debug"):
+            _handle_debug_command(user_input)
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/active":
+            active_file = get_active_file()
+            active_url = get_active_url()
+            active_app = get_active_app()
+            print(f"Active file: {active_file or '(none)'}")
+            print(f"Active url: {active_url or '(none)'}")
+            print(f"Active app: {active_app or '(none)'}")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/files":
+            state = load_state()
+            _print_recent("files", state.get("recent_files", []))
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/urls":
+            state = load_state()
+            _print_recent("urls", state.get("recent_urls", []))
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/apps":
+            state = load_state()
+            _print_recent("apps", state.get("recent_apps", []))
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input.startswith("/use"):
+            raw = user_input[len("/use") :].strip()
+            if not raw:
+                print("Usage: /use <number|path>")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            if raw.isdigit():
+                state = load_state()
+                index = int(raw)
+                recent_files = state.get("recent_files", [])
+                if index < 1 or index > len(recent_files):
+                    print("Invalid file number.")
+                    prompt_shown = False
+                    prompt_spoken = False
+                    continue
+                selected = recent_files[index - 1]
+                set_active_file(selected)
+                print(f"Active file set: {selected}")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            set_active_file(raw)
+            print(f"Active file set: {raw}")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/clear":
+            clear_state()
+            print("State cleared.")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/screens":
+            list_screenshots()
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/voice devices":
+            try:
+                devices = sd.query_devices()
+                print("Audio devices:")
+                for i, d in enumerate(devices):
+                    name = d.get("name")
+                    ins = d.get("max_input_channels")
+                    outs = d.get("max_output_channels")
+                    print(f"  {i}: {name} (in={ins}, out={outs})")
+            except Exception as exc:
+                print(f"Cannot query devices: {exc}")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input.startswith("/voice device"):
+            parts = user_input.split()
+            if len(parts) != 3 or not parts[2].isdigit():
+                print("Usage: /voice device <index>")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            set_voice_device(int(parts[2]))
+            input_manager.reset_voice_input()
+            print(f"Voice input device set to {parts[2]} (re-init).")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input == "/voice models":
+            print("Voice recognition models:")
+            print("  vosk: small | full (uses local models folder)")
+            print("  whisper: small | full (maps to base)")
+            print("Use: /voice model <engine> <size>")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+        if user_input.startswith("/voice model"):
+            parts = user_input.split()
+            if len(parts) != 4:
+                print("Usage: /voice model <engine> <size>")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            engine = parts[2].lower()
+            size = parts[3].lower()
+            if engine not in {"vosk", "whisper"}:
+                print("Engine must be 'vosk' or 'whisper'.")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            if size not in {"small", "full", "base", "medium", "large"}:
+                print("Size must be small/full (or base/medium/large for whisper).")
+                prompt_shown = False
+                prompt_spoken = False
+                continue
+            normalized_size = "full" if size in {"full"} else size
+            set_voice_engine(engine)
+            set_voice_model_size(normalized_size)
+            input_manager.reset_voice_input()
+            print(f"Voice model set: engine={engine}, size={normalized_size} (re-init).")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+
+        if user_input.startswith("/voice"):
+            if user_input == "/voice" or user_input.endswith("on"):
+                voice_enabled = True
+                input_manager.set_voice_enabled(True)
+                print("Voice mode enabled.")
+            elif user_input.endswith("off"):
+                voice_enabled = False
+                input_manager.set_voice_enabled(False)
+                print("Voice mode disabled.")
+            else:
+                print("Usage: /voice [on|off]")
+            prompt_shown = False
+            prompt_spoken = False
+            continue
+
+        original_query = user_input
+        resolved_query = get_route(user_input)
+        force_llm = False
+        if not resolved_query:
+            if voice_enabled:
+                try:
+                    speak_out("Сейчас разберусь с задачей.")
+                except Exception:
+                    pass
+            resolved_query, force_llm = _resolve_request(user_input)
+        start_task(original_query, resolved_query, force_llm)
+        prompt_shown = False
+        prompt_spoken = False
+
+
+if __name__ == "__main__":
+    from ui import main as ui_main
+
+    ui_main()
