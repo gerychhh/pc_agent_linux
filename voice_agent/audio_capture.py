@@ -11,8 +11,8 @@ import sounddevice as sd
 from .bus import Event, EventBus
 
 
-def _resample_int16_mono(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    """Resample mono int16 to dst_sr with minimal deps.
+def _resample_float_mono(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    """Resample mono float32 to dst_sr with minimal deps.
 
     Purpose: avoid paInvalidSampleRate on ALSA hw:* devices (often 48k only).
     We open the stream at device-supported SR, then resample to target SR (usually 16k).
@@ -20,7 +20,7 @@ def _resample_int16_mono(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
     - If src_sr is an integer multiple of dst_sr: cheap decimation with box-filter.
     - Else: linear interpolation.
 
-    Returns 1D int16 mono.
+    Returns 1D float32 mono in [-1, 1].
     """
     if src_sr == dst_sr:
         y = x
@@ -28,25 +28,23 @@ def _resample_int16_mono(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
         x = np.asarray(x)
         if x.ndim == 2:
             x = x[:, 0]
-        if x.dtype != np.int16:
-            x = x.astype(np.int16, copy=False)
 
         if src_sr % dst_sr == 0:
             factor = src_sr // dst_sr
             n = (len(x) // factor) * factor
             if n <= 0:
-                return np.zeros((0,), dtype=np.int16)
+                return np.zeros((0,), dtype=np.float32)
             y = x[:n].reshape(-1, factor).astype(np.float32).mean(axis=1)
         else:
             n_dst = int(round(len(x) * (dst_sr / float(src_sr))))
             if n_dst <= 0:
-                return np.zeros((0,), dtype=np.int16)
+                return np.zeros((0,), dtype=np.float32)
             xp = np.linspace(0.0, 1.0, num=len(x), endpoint=False)
             fp = x.astype(np.float32)
             xnew = np.linspace(0.0, 1.0, num=n_dst, endpoint=False)
             y = np.interp(xnew, xp, fp)
 
-    return np.clip(np.round(y), -32768, 32767).astype(np.int16)
+    return y.astype(np.float32, copy=False)
 
 
 @dataclass(frozen=True)
@@ -78,15 +76,18 @@ class AudioCapture:
         self._input_dtype = (config.input_dtype or "float32").strip().lower()
         self._last_clip_warn = 0.0
 
-    def _to_int16(self, data: np.ndarray) -> np.ndarray:
-        if data.dtype == np.int16:
-            return data
+    def _to_float32(self, data: np.ndarray) -> np.ndarray:
         if data.dtype.kind == "f":
-            clipped = np.clip(data, -1.0, 1.0)
-            return np.round(clipped * 32767.0).astype(np.int16)
+            return np.clip(data.astype(np.float32, copy=False), -1.0, 1.0)
+        if data.dtype == np.int16:
+            return (data.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
         if data.dtype == np.int32:
-            return np.clip(data, -32768, 32767).astype(np.int16)
-        return data.astype(np.int16, copy=False)
+            return (data.astype(np.float32) / 2147483648.0).clip(-1.0, 1.0)
+        return np.clip(data.astype(np.float32), -1.0, 1.0)
+
+    def _float_to_int16(self, data: np.ndarray) -> np.ndarray:
+        clipped = np.clip(data, -1.0, 1.0)
+        return np.round(clipped * 32767.0).astype(np.int16)
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
@@ -98,18 +99,21 @@ class AudioCapture:
 
         ts = time.monotonic()
 
-        data = self._to_int16(indata)
-        if data.size:
-            peak = int(np.max(np.abs(data)))
-            if peak >= 32700 and (ts - self._last_clip_warn) > 2.0:
-                self.logger.warning("Audio clipping detected (peak=%s). Reduce mic gain or preamp.", peak)
+        data_f = self._to_float32(indata)
+        if data_f.size:
+            peak_f = float(np.max(np.abs(data_f)))
+            if peak_f >= 1.0 and (ts - self._last_clip_warn) > 2.0:
+                self.logger.warning("Audio clipping detected (peak=%.3f). Reduce mic gain or preamp.", peak_f)
                 self._last_clip_warn = ts
 
         # Resample if hardware stream SR differs from target
         if self._stream_sr != int(self.config.sample_rate):
-            y = _resample_int16_mono(data, self._stream_sr, int(self.config.sample_rate))
-            data = y.reshape(-1, 1)  # keep shape (n,1)
+            y = _resample_float_mono(data_f, self._stream_sr, int(self.config.sample_rate))
+            data = self._float_to_int16(y).reshape(-1, 1)
         else:
+            if data_f.ndim > 1:
+                data_f = data_f[:, 0]
+            data = self._float_to_int16(data_f)
             if data.ndim == 1:
                 data = data.reshape(-1, 1)
 
