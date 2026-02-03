@@ -298,6 +298,7 @@ class VoiceAgentRuntime:
         self.asr.reset()
         self.asr.speech_start()
         self._listening_started_at = time.monotonic()
+        self.logger.info("ASR listening started (reason=%s ts=%.3f)", reason, ts)
 
         try:
             if self._last_chunk is not None:
@@ -386,6 +387,7 @@ class VoiceAgentRuntime:
         self._status("wake.detected", {"best": best, "best_name": best_name, "scores": scores})
 
         detected_ts = float(event.payload.get("ts", time.monotonic()))
+        self.logger.info("Wake-word armed at ts=%.3f", detected_ts)
         self._set_state("ARMED")
         self._armed_since = detected_ts
         self.vad.reset()
@@ -396,16 +398,19 @@ class VoiceAgentRuntime:
         if self.state.name not in {"ARMED", "LISTENING"}:
             return
         ts = float(event.payload.get("ts", self._last_chunk_ts))
+        self.logger.info("VAD speech_start ts=%.3f", ts)
         self._begin_listening(ts, reason="vad")
 
     def _on_vad_end(self, event: Event) -> None:
         if self.state.name != "LISTENING":
             return
+        ts = float(event.payload.get("ts", time.monotonic()))
+        self.logger.info("VAD speech_end ts=%.3f", ts)
         self._set_state("DECODING")
         self._listening_started_at = None
         self._decode_started_at = time.monotonic()
-        self._status("vad.speech_end", {"ts": event.payload.get("ts")})
-        self.asr.speech_end(float(event.payload.get("ts", time.monotonic())))
+        self._status("vad.speech_end", {"ts": ts})
+        self.asr.speech_end(ts)
         # Do NOT reset to IDLE here; wait for asr.final or timeout.
 
     def _on_partial(self, event: Event) -> None:
@@ -415,6 +420,7 @@ class VoiceAgentRuntime:
         if self._on_partial_cb:
             self._on_partial_cb(text)
         self._status("asr.partial", {"text": text})
+        self.logger.debug("ASR partial: %s", text)
 
     def _strip_wake_prefix(self, text: str) -> str:
         t = text.strip()

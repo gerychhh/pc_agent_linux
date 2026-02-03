@@ -101,11 +101,13 @@ class FasterWhisperASR:
         self.reset()
         self._speaking = True
         self.bus.publish(Event("asr.speech_start", {"ts": time.time()}))
+        self.logger.info("ASR speech_start")
 
     def speech_end(self, ts: float | None = None) -> None:
         if not self._speaking:
             return
         self._speaking = False
+        self.logger.info("ASR speech_end")
         self._finalize()
 
     def accept_audio(self, pcm_int16: np.ndarray, ts: float) -> None:
@@ -161,11 +163,15 @@ class FasterWhisperASR:
     def _finalize(self) -> None:
         if self._buffer_duration_s() < float(self.config.min_buffer_s):
             # too short
+            self.logger.info("ASR finalize skipped (buffer %.2fs < min_buffer_s=%.2f)",
+                             self._buffer_duration_s(), float(self.config.min_buffer_s))
             self.bus.publish(Event("asr.final", {"ts": time.time(), "text": ""}))
             self.reset()
             return
 
+        self.logger.info("ASR finalize start (buffer %.2fs)", self._buffer_duration_s())
         text = self._transcribe(joined_only=False)
+        self.logger.info("ASR finalize done (len=%d)", len(text or ""))
         self.bus.publish(Event("asr.final", {"ts": time.time(), "text": (text or "").strip()}))
         self.reset()
 
