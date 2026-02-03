@@ -11,13 +11,28 @@ import sounddevice as sd
 from .bus import Event, EventBus
 
 
+def _resample_float_mono(x: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    if src_sr == dst_sr:
+        return x.astype(np.float32, copy=False)
+    x = np.asarray(x, dtype=np.float32)
+    if x.ndim == 2:
+        x = x[:, 0]
+    n_dst = int(round(len(x) * (dst_sr / float(src_sr))))
+    if n_dst <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    xp = np.linspace(0.0, 1.0, num=len(x), endpoint=False)
+    fp = x.astype(np.float32)
+    xnew = np.linspace(0.0, 1.0, num=n_dst, endpoint=False)
+    y = np.interp(xnew, xp, fp)
+    return y.astype(np.float32, copy=False)
+
 @dataclass(frozen=True)
 class AudioConfig:
     sample_rate: int
     channels: int
     chunk_ms: int
     device: int | None = None
-    input_dtype: str = "int16"
+    input_dtype: str = "float32"
 
 
 class AudioCapture:
@@ -40,15 +55,18 @@ class AudioCapture:
         self._input_dtype = (config.input_dtype or "float32").strip().lower()
         self._last_clip_warn = 0.0
 
-    def _to_int16(self, data: np.ndarray) -> np.ndarray:
-        if data.dtype == np.int16:
-            return data
+    def _to_float32(self, data: np.ndarray) -> np.ndarray:
         if data.dtype.kind == "f":
-            clipped = np.clip(data, -1.0, 1.0)
-            return np.round(clipped * 32767.0).astype(np.int16)
+            return np.clip(data.astype(np.float32, copy=False), -1.0, 1.0)
+        if data.dtype == np.int16:
+            return (data.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
         if data.dtype == np.int32:
-            return np.clip(data, -32768, 32767).astype(np.int16)
-        return data.astype(np.int16, copy=False)
+            return (data.astype(np.float32) / 2147483648.0).clip(-1.0, 1.0)
+        return np.clip(data.astype(np.float32), -1.0, 1.0)
+
+    def _float_to_int16(self, data: np.ndarray) -> np.ndarray:
+        clipped = np.clip(data, -1.0, 1.0)
+        return np.round(clipped * 32767.0).astype(np.int16)
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
@@ -60,12 +78,19 @@ class AudioCapture:
 
         ts = time.monotonic()
 
-        data = self._to_int16(indata)
-        if data.size:
-            peak = int(np.max(np.abs(data)))
-            if peak >= 32700 and (ts - self._last_clip_warn) > 2.0:
-                self.logger.warning("Audio clipping detected (peak=%s). Reduce mic gain or preamp.", peak)
+        data_f = self._to_float32(indata)
+        if data_f.size:
+            peak_f = float(np.max(np.abs(data_f)))
+            if peak_f >= 1.0 and (ts - self._last_clip_warn) > 2.0:
+                self.logger.warning("Audio clipping detected (peak=%.3f). Reduce mic gain or preamp.", peak_f)
                 self._last_clip_warn = ts
+
+        if self._stream_sr != int(self.config.sample_rate):
+            data_f = _resample_float_mono(data_f, self._stream_sr, int(self.config.sample_rate))
+
+        if data_f.ndim > 1:
+            data_f = data_f[:, 0]
+        data = self._float_to_int16(data_f)
         if data.ndim == 1:
             data = data.reshape(-1, 1)
 
@@ -117,9 +142,8 @@ class AudioCapture:
                     fallback_sr = 48000
 
                 self.logger.warning(
-                    "Requested sample_rate=%s not supported by device=%s. Falling back to %s Hz without resampling. "
-                    "Set audio.sample_rate=%s in config to avoid mismatched ASR/VAD sample rates.",
-                    target_sr, self.config.device, fallback_sr, fallback_sr
+                    "Requested sample_rate=%s not supported by device=%s. Falling back to %s Hz and resampling to %s.",
+                    target_sr, self.config.device, fallback_sr, target_sr
                 )
 
                 self._stream_sr = fallback_sr

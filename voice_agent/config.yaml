@@ -3,7 +3,7 @@ audio:
   channels: 1
   chunk_ms: 20
   device: 7
-  input_dtype: int16
+  input_dtype: float32
 wake_word:
   enabled: true
   backend: openwakeword
