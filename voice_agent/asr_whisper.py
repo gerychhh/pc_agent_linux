@@ -49,6 +49,9 @@ class FasterWhisperASR:
         self.logger = logging.getLogger("voice_agent.asr_whisper")
 
         self._model = None
+        self._device = "cpu"
+        self._compute_type = self.config.compute_type
+        self._fallback_used = False
         self._speaking = False
         self._buf: list[np.ndarray] = []
         self._last_partial_at = 0.0
@@ -56,22 +59,37 @@ class FasterWhisperASR:
 
         self._load_model()
 
-    def _load_model(self) -> None:
+    def _load_model(self, *, force_device: str | None = None) -> None:
         try:
             from faster_whisper import WhisperModel  # type: ignore
         except Exception as exc:
             raise RuntimeError("faster-whisper is not installed. Install: pip install faster-whisper") from exc
 
-        device = (self.config.device or "auto").strip().lower()
+        device = (force_device or self.config.device or "auto").strip().lower()
+        if device not in {"cpu", "cuda", "auto"}:
+            device = "auto"
         if device == "auto":
             try:
                 import torch  # type: ignore
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 device = "cpu"
+        if device == "cuda":
+            try:
+                import torch  # type: ignore
+                if not torch.cuda.is_available():
+                    device = "cpu"
+            except Exception:
+                device = "cpu"
 
-        self._model = WhisperModel(self.config.model, device=device, compute_type=self.config.compute_type)
-        self.logger.info("ASR whisper model loaded: model=%s device=%s compute=%s", self.config.model, device, self.config.compute_type)
+        compute_type = (self.config.compute_type or "int8").strip()
+        if device == "cpu" and compute_type in {"float16", "int8_float16"}:
+            compute_type = "int8"
+
+        self._device = device
+        self._compute_type = compute_type
+        self._model = WhisperModel(self.config.model, device=device, compute_type=compute_type)
+        self.logger.info("ASR whisper model loaded: model=%s device=%s compute=%s", self.config.model, device, compute_type)
 
     def reset(self) -> None:
         self._speaking = False
@@ -173,5 +191,25 @@ class FasterWhisperASR:
             text = "".join(seg.text for seg in segments).strip()
             return text
         except Exception as exc:
+            err = str(exc).lower()
+            if (not self._fallback_used) and ("cuda" in err or "out of memory" in err):
+                self.logger.warning("ASR CUDA error detected; falling back to CPU: %s", exc)
+                try:
+                    self._fallback_used = True
+                    self._load_model(force_device="cpu")
+                    segments, info = self._model.transcribe(
+                        audio,
+                        language=(self.config.language or None),
+                        beam_size=int(self.config.beam_size or 1),
+                        vad_filter=True,
+                        no_speech_threshold=float(self.config.no_speech_threshold),
+                        log_prob_threshold=float(self.config.log_prob_threshold),
+                        compression_ratio_threshold=float(self.config.compression_ratio_threshold),
+                    )
+                    text = "".join(seg.text for seg in segments).strip()
+                    return text
+                except Exception as retry_exc:
+                    self.logger.error("ASR CPU fallback failed: %s", retry_exc)
+                    return ""
             self.logger.error("ASR transcribe error: %s", exc)
             return ""
