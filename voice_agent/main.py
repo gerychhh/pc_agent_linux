@@ -536,12 +536,21 @@ class VoiceAgentRuntime:
                 if not events:
                     continue
 
-                COALESCE = {"audio.chunk", "audio.level", "wake_word.scores", "vad.score", "asr.partial"}
+                # IMPORTANT:
+                # Do NOT coalesce audio.chunk while ARMED/LISTENING/DECODING.
+                # If we drop chunks, the ASR buffer gets "broken" audio (scratches, random fragments)
+                # and recognition quality collapses.
+                #
+                # We still coalesce UI/status events to stay responsive.
+                COALESCE_STATUS = {"audio.level", "wake_word.scores", "vad.score", "asr.partial"}
                 coalesced: dict[str, Event] = {}
                 essential: list[Event] = []
+                audio_chunks: list[Event] = []
 
                 for ev in events:
-                    if ev.type in COALESCE:
+                    if ev.type == "audio.chunk":
+                        audio_chunks.append(ev)
+                    elif ev.type in COALESCE_STATUS:
                         coalesced[ev.type] = ev
                     else:
                         essential.append(ev)
@@ -556,10 +565,15 @@ class VoiceAgentRuntime:
                     if ev:
                         self.bus.dispatch(ev)
 
-                # 3) Finally process the newest audio chunk (feeds wake/VAD/ASR)
-                ev = coalesced.get("audio.chunk")
-                if ev:
-                    self.bus.dispatch(ev)
+                # 3) Audio path:
+                # - while IDLE: it's OK to process only the newest chunk (saves CPU for wake-word)
+                # - after wake (ARMED/LISTENING/DECODING): process ALL chunks in order for clean ASR audio
+                if audio_chunks:
+                    if self.state.name == "IDLE":
+                        self.bus.dispatch(audio_chunks[-1])
+                    else:
+                        for ev in audio_chunks:
+                            self.bus.dispatch(ev)
 
             self.logger.info("Voice agent loop stopped.")
 

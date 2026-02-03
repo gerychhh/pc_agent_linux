@@ -2,31 +2,31 @@ audio:
   sample_rate: 16000
   channels: 1
   chunk_ms: 20
-  device: 7
+  device: 6
   input_dtype: float32
 wake_word:
   enabled: true
   backend: openwakeword
-  agent_name: "бивис"
-  keyword: "бивис"
+  agent_name: бивис
+  keyword: бивис
   keyword_aliases:
-  - "бивис"
-  - "beavis"
+  - бивис
+  - beavis
   model_paths:
   - models/beavis.onnx
-  threshold: 0.1
-  patience_frames: 2
+  threshold: 0.6
+  patience_frames: 1
   cooldown_ms: 900
-  min_rms: 0.002
+  min_rms: 0.005
   inference_framework: onnx
   vad_threshold: 0.0
-  preroll_ms: 450
+  preroll_ms: 20
   history_size: 40
 vad:
-  device: cpu
-  threshold: 0.5
+  device: cuda
+  threshold: 0.9
   min_speech_ms: 150
-  end_silence_ms: 1000
+  end_silence_ms: 250
   min_rms: 0.0025
   noise_floor_alpha: 0.05
   noise_ratio: 2.0

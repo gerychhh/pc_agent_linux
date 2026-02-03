@@ -125,6 +125,36 @@
       "type": "cmd",
       "id": "CMD_OPEN_TEXT_EDITOR",
       "params": {}
+    },
+    "youtube.": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com'"
+    },
+    "пасскажи о себе.": {
+      "type": "script",
+      "lang": "bash",
+      "script": "uname -a\nlspci | grep -i vga\ncat /etc/os-release"
+    },
+    "всем привет!": {
+      "type": "script",
+      "lang": "bash",
+      "script": "echo 'Привет!'"
+    },
+    "но ты такой": {
+      "type": "script",
+      "lang": "bash",
+      "script": "systemctl list-units --type=service --state=running | grep -E 'display|ssh'\nps -eo pid,comm,%cpu,%mem --sort=-%cpu | head"
+    },
+    "ко-во-ю-туб.": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open https://www.youtube.com"
+    },
+    "приши мне пример кодда на питоне банковского приложения.": {
+      "type": "script",
+      "lang": "bash",
+      "script": "NEED_CONFIRM\npython3 -c '\nclass BankAccount:\n    def __init__(self, balance=0):\n        self.balance = balance\n\n    def deposit(self, amount):\n        self.balance += amount\n        return self.balance\n\n    def withdraw(self, amount):\n        if amount <= self.balance:\n            self.balance -= amount\n            return self.balance\n        else:\n            return \"Insufficient funds\"\n\naccount = BankAccount(100)\nprint(\"Initial balance:\", account.deposit(50))\nprint(\"Withdraw 20:\", account.withdraw(20))\nprint(\"Deposit 30:\", account.deposit(30))\nprint(\"Final balance:\", account.withdraw(100))\n'"
     }
   },
   "history": []
