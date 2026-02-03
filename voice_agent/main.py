@@ -221,6 +221,7 @@ class VoiceAgentRuntime:
                     log_prob_threshold=float(asr_cfg.get("log_prob_threshold", -1.0)),
                     compression_ratio_threshold=float(asr_cfg.get("compression_ratio_threshold", 2.4)),
                     min_buffer_s=float(asr_cfg.get("min_buffer_s", 0.6)),
+                    dump_audio_dir=str(asr_cfg.get("dump_audio_dir") or "").strip() or None,
                 ),
                 self.bus,
             )
@@ -335,6 +336,9 @@ class VoiceAgentRuntime:
                 mono = data
             if mono.dtype != np.int16:
                 mono = mono.astype(np.int16, copy=False)
+            if self.logger.isEnabledFor(logging.DEBUG):
+                rms = float(np.sqrt(np.mean((mono.astype(np.float32) / 32768.0) ** 2))) if mono.size else 0.0
+                self.logger.debug("Audio RMS pre-VAD=%.5f state=%s", rms, self.state.name)
             if self._preroll_samples > 0:
                 self._preroll_buf = np.concatenate([self._preroll_buf, mono], axis=0)
                 if self._preroll_buf.size > self._preroll_samples:

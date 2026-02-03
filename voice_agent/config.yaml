@@ -42,6 +42,7 @@ asr:
   beam_size: 1
   max_utterance_s: 8
   decode_timeout_ms: 5000
+  dump_audio_dir: ''
 logging:
   level: info
 voice: {}

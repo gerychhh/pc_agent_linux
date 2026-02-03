@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
+import wave
 
 import numpy as np
 
@@ -28,6 +30,7 @@ class AsrConfig:
     no_speech_threshold: float = 0.8
     log_prob_threshold: float = -1.0
     compression_ratio_threshold: float = 2.4
+    dump_audio_dir: str | None = None
 
 
 class FasterWhisperASR:
@@ -53,6 +56,9 @@ class FasterWhisperASR:
         self._compute_type = self.config.compute_type
         self._fallback_used = False
         self._speaking = False
+        self._dump_dir: Path | None = Path(self.config.dump_audio_dir).expanduser().resolve() if self.config.dump_audio_dir else None
+        self._dump_wave: wave.Wave_write | None = None
+        self._dump_path: Path | None = None
         self._buf: list[np.ndarray] = []
         self._last_partial_at = 0.0
         self._last_partial_text = ""
@@ -96,10 +102,18 @@ class FasterWhisperASR:
         self._buf.clear()
         self._last_partial_at = 0.0
         self._last_partial_text = ""
+        if self._dump_wave is not None:
+            try:
+                self._dump_wave.close()
+            except Exception:
+                pass
+        self._dump_wave = None
+        self._dump_path = None
 
     def speech_start(self) -> None:
         self.reset()
         self._speaking = True
+        self._open_dump()
         self.bus.publish(Event("asr.speech_start", {"ts": time.time()}))
         self.logger.info("ASR speech_start")
 
@@ -118,7 +132,13 @@ class FasterWhisperASR:
 
         # Keep only max_utterance_s seconds
         max_samples = int(self.config.max_utterance_s * self.config.sample_rate)
-        self._buf.append(pcm_int16.astype(np.int16, copy=False))
+        pcm_i16 = pcm_int16.astype(np.int16, copy=False)
+        self._buf.append(pcm_i16)
+        if self._dump_wave is not None:
+            try:
+                self._dump_wave.writeframes(pcm_i16.tobytes())
+            except Exception as exc:
+                self.logger.warning("ASR dump write failed: %s", exc)
         total = sum(b.size for b in self._buf)
         if total > max_samples:
             # drop from front
@@ -219,3 +239,22 @@ class FasterWhisperASR:
                     return ""
             self.logger.error("ASR transcribe error: %s", exc)
             return ""
+
+    def _open_dump(self) -> None:
+        if self._dump_dir is None:
+            return
+        try:
+            self._dump_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            path = self._dump_dir / f"asr_{ts}.wav"
+            wf = wave.open(str(path), "wb")
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(int(self.config.sample_rate))
+            self._dump_wave = wf
+            self._dump_path = path
+            self.logger.info("ASR dump enabled: %s", path)
+        except Exception as exc:
+            self.logger.warning("ASR dump open failed: %s", exc)
+            self._dump_wave = None
+            self._dump_path = None
