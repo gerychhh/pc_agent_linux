@@ -118,6 +118,8 @@ class VoiceAgentRuntime:
         self._last_chunk_ts: float = 0.0
         self._armed_since: float | None = None
         self._wake_words = self._build_wake_words(wake_cfg)
+        self._last_vad_voice_ts: float | None = None
+        self._vad_tail_ms = int(vad_cfg.get("speech_tail_ms", 350))
 
         # Components
         self.audio = AudioCapture(
@@ -301,6 +303,11 @@ class VoiceAgentRuntime:
         self.logger.info("ASR listening started (reason=%s ts=%.3f)", reason, ts)
 
         try:
+            if self._preroll_buf.size:
+                self.asr.accept_audio(self._preroll_buf.copy(), ts)
+        except Exception:
+            pass
+        try:
             if self._last_chunk is not None:
                 lc = self._last_chunk
                 lc_mono = lc[:, 0] if getattr(lc, "ndim", 1) > 1 else lc
@@ -351,7 +358,11 @@ class VoiceAgentRuntime:
 
         if self.state.name == "LISTENING":
             self.vad.process_chunk(data, ts)
-            if self.vad.speaking:
+            should_feed = self.vad.speaking
+            if (not should_feed) and self._last_vad_voice_ts is not None:
+                if (ts - self._last_vad_voice_ts) * 1000.0 <= self._vad_tail_ms:
+                    should_feed = True
+            if should_feed:
                 # Feed ASR mono 1-D int16 to avoid shape mismatches (preroll is 1-D).
                 mono_for_asr = data[:, 0] if getattr(data, "ndim", 1) > 1 else data
                 if getattr(mono_for_asr, "dtype", None) != np.int16:
@@ -375,6 +386,11 @@ class VoiceAgentRuntime:
         self._status("wake.scores", dict(event.payload))
 
     def _on_vad_score(self, event: Event) -> None:
+        if event.payload.get("is_voice"):
+            try:
+                self._last_vad_voice_ts = float(event.payload.get("ts", time.monotonic()))
+            except (TypeError, ValueError):
+                pass
         self._status("vad.score", dict(event.payload))
 
     def _on_wake_word(self, event: Event) -> None:

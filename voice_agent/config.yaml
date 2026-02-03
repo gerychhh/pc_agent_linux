@@ -31,6 +31,7 @@ vad:
   noise_ratio: 2.0
   score_emit_ms: 120
   use_rms_gate_with_silero: false
+  speech_tail_ms: 350
 asr:
   backend: whisper
   language: ru
