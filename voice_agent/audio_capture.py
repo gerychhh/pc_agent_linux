@@ -55,6 +55,7 @@ class AudioConfig:
     channels: int
     chunk_ms: int
     device: int | None = None
+    input_dtype: str = "float32"
 
 
 class AudioCapture:
@@ -74,6 +75,18 @@ class AudioCapture:
         self._stream_sr: int = int(config.sample_rate)  # actual opened stream SR
         self._last_level_emit = 0.0
         self._muted = False
+        self._input_dtype = (config.input_dtype or "float32").strip().lower()
+        self._last_clip_warn = 0.0
+
+    def _to_int16(self, data: np.ndarray) -> np.ndarray:
+        if data.dtype == np.int16:
+            return data
+        if data.dtype.kind == "f":
+            clipped = np.clip(data, -1.0, 1.0)
+            return np.round(clipped * 32767.0).astype(np.int16)
+        if data.dtype == np.int32:
+            return np.clip(data, -32768, 32767).astype(np.int16)
+        return data.astype(np.int16, copy=False)
 
     def set_muted(self, muted: bool) -> None:
         self._muted = muted
@@ -85,10 +98,12 @@ class AudioCapture:
 
         ts = time.monotonic()
 
-        data = indata
-        # Ensure int16
-        if data.dtype != np.int16:
-            data = data.astype(np.int16, copy=False)
+        data = self._to_int16(indata)
+        if data.size:
+            peak = int(np.max(np.abs(data)))
+            if peak >= 32700 and (ts - self._last_clip_warn) > 2.0:
+                self.logger.warning("Audio clipping detected (peak=%s). Reduce mic gain or preamp.", peak)
+                self._last_clip_warn = ts
 
         # Resample if hardware stream SR differs from target
         if self._stream_sr != int(self.config.sample_rate):
@@ -129,7 +144,7 @@ class AudioCapture:
                 samplerate=target_sr,
                 channels=self.config.channels,
                 blocksize=blocksize,
-                dtype="int16",
+                dtype=self._input_dtype,
                 device=self.config.device,
                 callback=self._callback,
             )
@@ -156,7 +171,7 @@ class AudioCapture:
                     samplerate=fallback_sr,
                     channels=self.config.channels,
                     blocksize=blocksize_fb,
-                    dtype="int16",
+                    dtype=self._input_dtype,
                     device=self.config.device,
                     callback=self._callback,
                 )

@@ -128,6 +128,7 @@ class VoiceAgentRuntime:
                 channels=int(audio_cfg.get("channels", 1)),
                 chunk_ms=int(audio_cfg.get("chunk_ms", 20)),
                 device=audio_cfg.get("device"),
+                input_dtype=str(audio_cfg.get("input_dtype", "float32")),
             ),
             self.bus,
         )
