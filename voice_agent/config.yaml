@@ -43,7 +43,7 @@ asr:
   beam_size: 1
   max_utterance_s: 8
   decode_timeout_ms: 5000
-  dump_audio_dir: ''
+  dump_audio_dir: /home/gerychhh/asr_dumps
 logging:
   level: info
 voice: {}
