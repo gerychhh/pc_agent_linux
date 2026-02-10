@@ -566,14 +566,12 @@ class VoiceAgentRuntime:
                         self.bus.dispatch(ev)
 
                 # 3) Audio path:
-                # - while IDLE: it's OK to process only the newest chunk (saves CPU for wake-word)
-                # - after wake (ARMED/LISTENING/DECODING): process ALL chunks in order for clean ASR audio
+                # IMPORTANT: do NOT coalesce audio.chunk, иначе легко теряется начало команды.
+                # We keep status coalescing above, but audio must be processed in order.
                 if audio_chunks:
-                    if self.state.name == "IDLE":
-                        self.bus.dispatch(audio_chunks[-1])
-                    else:
-                        for ev in audio_chunks:
-                            self.bus.dispatch(ev)
+                    for ev in audio_chunks:
+                        self.bus.dispatch(ev)
+
 
             self.logger.info("Voice agent loop stopped.")
 

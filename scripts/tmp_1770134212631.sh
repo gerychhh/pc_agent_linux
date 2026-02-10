@@ -1,0 +1,1 @@
+xdg-open '/home/gerychhh/.notepad'

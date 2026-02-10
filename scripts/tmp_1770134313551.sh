@@ -1,0 +1,1 @@
+xdg-open '/path/to/your/file_or_directory'

@@ -1,5 +1,5 @@
 {
-  "active_file": "/home/gerychhh/.notepad",
+  "active_file": "/path/to/your/file_or_directory",
   "active_url": "https://www.youtube.com/",
   "active_app": "notepad",
   "active_window_title": "PC Agent",
@@ -7,6 +7,7 @@
   "active_window_hwnd": "0xe0005b",
   "active_window_pid": null,
   "recent_files": [
+    "/path/to/your/file_or_directory",
     "/home/gerychhh/.notepad",
     ". &>/dev/null & disown",
     "/usr/bin/notepad",
@@ -25,8 +26,7 @@
     "launched папку для рабочего стола",
     "launched стин",
     "launched сами",
-    "launched Blender",
-    "launched стим"
+    "launched Blender"
   ],
   "recent_urls": [
     "https://www.youtube.com/",
