@@ -165,6 +165,73 @@
       "type": "script",
       "lang": "bash",
       "script": "xdg-open 'https://www.youtube.com/'"
+    },
+    "создай папку с именем тест на рабочем столе": {
+      "type": "script",
+      "lang": "bash",
+      "script": "mkdir -p ~/Desktop/тест\necho 'OK'"
+    },
+    "рекурсивно создай в ней (внутри внутри) 10 раз папку тест внутри созданной только что": {
+      "type": "script",
+      "lang": "bash",
+      "script": "mkdir -p тест/{тест,{тест,{тест,{тест,{тест,{тест,{тест,{тест,тест}}}}}}}}\nif [ $? -eq 0 ]; then echo 'OK'; else echo 'ERROR'; fi"
+    },
+    "на рабочем столе создай текстовй документ с выводом привет мир на 5 популярных языках программирования": {
+      "type": "script",
+      "lang": "bash",
+      "script": "mkdir -p ~/Desktop/programming && cd ~/Desktop/programming\nfor lang in python ruby java c c++; do\n  echo -e '#!/bin/bash\\necho -e \"Hello World\"'> $lang.sh\n  case $lang in\n    python) echo \"print('Hello World')\" >> $lang.sh ;;\n    ruby)  echo \"puts 'Hello World'\" >> $lang.sh ;;\n    java)  echo \"public class HelloWorld { public static void main(String[] args) { System.out.println(\\\"Hello World\\\"); } }\" > HelloWorld.java; javac HelloWorld.java ;; \n    c)     echo \"#include <stdio.h>\\nint main() { printf(\\\"Hello World\\\\n\\\"); return 0; }\" > $lang.c ;;\n    c++)   echo \"#include <stdio.h>\\nint main() { printf(\\\"Hello World\\\\n\\\"); return 0; }\" > $lang.cpp ;;\n  esac\n  chmod +x $lang.sh\ndone\necho 'Documents created'"
+    },
+    "открой алибаба": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open https://www.aliyun.com/"
+    },
+    "открой текстовый редактор": {
+      "type": "cmd",
+      "id": "CMD_OPEN_TEXT_EDITOR",
+      "params": {}
+    },
+    "открой браузер": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.aliyun.com/'"
+    },
+    "открой ютуб и найди видео про космос": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com/results?search_query=космос'"
+    },
+    "открой любое видео на ютуб": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://www.youtube.com/results?search_query=космос'"
+    },
+    "chat gpt": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open https://chat.openai.com"
+    },
+    "чат гпт": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://chat.openai.com'"
+    },
+    "открой чат гпт": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open 'https://chat.openai.com'"
+    },
+    "открой чат джипити": {
+      "type": "script",
+      "lang": "bash",
+      "script": "xdg-open https://chat.douban.com"
+    },
+    "открой приложение яндекс музыки на моём пк": {
+      "type": "cmd",
+      "id": "CMD_OPEN_APP",
+      "params": {
+        "app": "яндекс музыки на моём пк"
+      }
     }
   },
   "history": []

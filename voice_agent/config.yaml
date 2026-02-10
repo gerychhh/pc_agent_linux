@@ -2,7 +2,7 @@ audio:
   sample_rate: 16000
   channels: 1
   chunk_ms: 20
-  device: 6
+  device: 4
   input_dtype: float32
 wake_word:
   enabled: true

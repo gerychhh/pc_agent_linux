@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from .command_engine import CommandResult, load_commands, match_command, run_command
 from .config import FAST_MODEL, TIMEOUT_SEC
-from .context_builder import ctx_action, ctx_reporter
+from .context_builder import ctx_action, ctx_action_repair, ctx_reporter
 from .debug import debug_event, truncate_text
 from .executor import run_python, run_shell
 from .interaction_memory import find_similar_actions, get_action, set_action
@@ -300,6 +300,10 @@ class Orchestrator:
 
         parsed = parse_action_from_text(content)
         if not parsed:
+            repaired = self._repair_llm_script(user_text, state, llm_text)
+            if repaired is not None:
+                exec_result, action_desc, learned_action, repair_ms, repair_text = repaired
+                return exec_result, action_desc, learned_action, llm_ms + repair_ms, repair_text or llm_text
             return None, "", None, llm_ms, llm_text
 
         exec_result, normalized_lang = _validate_and_exec(parsed.language, parsed.script)
@@ -311,3 +315,39 @@ class Orchestrator:
 
         return exec_result, action_desc, learned_action, llm_ms, llm_text
 
+    def _repair_llm_script(
+        self, user_text: str, state: dict[str, Any], llm_text: str
+    ) -> tuple[dict[str, Any], str, dict[str, Any] | None, int, str] | None:
+        if not llm_text:
+            return None
+        payload = ctx_action_repair(state, user_text, llm_text)
+        debug_event("LLM_REQ", f"repair model={FAST_MODEL} payload={truncate_text(payload, 400)}")
+
+        t0 = time.monotonic()
+        try:
+            response = self.client.chat(
+                [{"role": "user", "content": payload}],
+                tools=[],
+                model_name=FAST_MODEL,
+                tool_choice="none",
+            )
+            content = response.choices[0].message.content or ""
+        except Exception as exc:
+            debug_event("LLM_ERR", str(exc))
+            return None
+
+        repair_text = sanitize_assistant_text(content)
+        repair_ms = int((time.monotonic() - t0) * 1000)
+
+        parsed = parse_action_from_text(content)
+        if not parsed:
+            return None
+
+        exec_result, normalized_lang = _validate_and_exec(parsed.language, parsed.script)
+        action_desc = _format_script_action(normalized_lang, parsed.script)
+
+        learned_action = None
+        if exec_result is not None and not exec_result.get("blocked"):
+            learned_action = {"type": "script", "lang": normalized_lang, "script": parsed.script}
+
+        return exec_result, action_desc, learned_action, repair_ms, repair_text

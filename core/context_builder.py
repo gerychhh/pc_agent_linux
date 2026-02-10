@@ -51,6 +51,39 @@ def ctx_action(state: dict[str, Any], user_text: str) -> str:
     )
 
 
+def ctx_action_repair(state: dict[str, Any], user_text: str, llm_text: str) -> str:
+    """Prompt for repairing malformed LLM output into an executable action."""
+    active_file = state.get("active_file") or ""
+    active_url = state.get("active_url") or ""
+    active_app = state.get("active_app") or ""
+
+    return (
+        "[SYSTEM] Ты — локальный ассистент для управления Linux-ПК.\n"
+        "Твоя задача: преобразовать предыдущий ответ в исполняемый bash-скрипт.\n"
+        "[ENV]\n"
+        "- OS=Linux (Ubuntu/Debian-like)\n"
+        "- Shell=bash\n"
+        "- Desktop=Wayland (управление окнами/вводом ограничено)\n"
+        "[STATE]\n"
+        f"- active_file: {active_file}\n"
+        f"- active_url: {active_url}\n"
+        f"- active_app: {active_app}\n"
+        "[OUTPUT]\n"
+        "- Верни РОВНО ОДИН fenced code block.\n"
+        "- Никаких пояснений до/после блока.\n"
+        "- Язык блока: bash.\n"
+        "- Никаких 'NEED_CONFIRM'.\n"
+        "- Если действие нельзя выполнять автоматически или команды непонятны — верни пустой блок:\n"
+        "```bash\n"
+        "\n"
+        "```\n"
+        "[TASK]\n"
+        f"{user_text}\n"
+        "[RAW_LLM_OUTPUT]\n"
+        f"{llm_text}\n"
+    )
+
+
 def ctx_reporter(state: dict[str, Any], user_text: str) -> str:
     """Prompt for text-only answers (no scripts)."""
     active_file = state.get("active_file") or ""

@@ -1,0 +1,1 @@
+xdg-open 'https://music.yandex.ru'

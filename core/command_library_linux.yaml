@@ -144,22 +144,166 @@ commands:
   - name: app
     from_user: true
   execute:
-    lang: bash
-    script: "set -e\na=\"{{app}}\"\n\n# common aliases → desktop IDs / flatpak IDs\n\
-      flatpak_id=\"\"\ncase \"$(echo \"$a\" | tr '[:upper:]' '[:lower:]')\" in\n \
-      \ steam) flatpak_id=\"com.valvesoftware.Steam\" ;;\n  discord) flatpak_id=\"\
-      com.discordapp.Discord\" ;;\n  telegram|telegram-desktop) flatpak_id=\"org.telegram.desktop\"\
-      \ ;;\n  spotify) flatpak_id=\"com.spotify.Client\" ;;\nesac\n\n# 1) desktop\
-      \ entry\nif command -v gtk-launch >/dev/null 2>&1; then\n  gtk-launch \"$a\"\
-      \ >/dev/null 2>&1 && echo \"OK\" && exit 0 || true\nfi\n\n# 2) run as command\
-      \ in PATH\nif command -v \"$a\" >/dev/null 2>&1; then\n  (\"$a\" >/dev/null\
-      \ 2>&1 &)\n  echo \"OK\"\n  exit 0\nfi\n\n# 3) flatpak fallback\nif [ -n \"\
-      $flatpak_id\" ] && command -v flatpak >/dev/null 2>&1; then\n  if flatpak info\
-      \ \"$flatpak_id\" >/dev/null 2>&1; then\n    (flatpak run \"$flatpak_id\" >/dev/null\
-      \ 2>&1 &)\n    echo \"OK\"\n    exit 0\n  fi\nfi\n\n# 4) snap fallback\nif command\
-      \ -v snap >/dev/null 2>&1; then\n  if snap list \"$a\" >/dev/null 2>&1; then\n\
-      \    (snap run \"$a\" >/dev/null 2>&1 &)\n    echo \"OK\"\n    exit 0\n  fi\n\
-      fi\n\necho \"App not found: $a\" >&2\nexit 1\n"
+    lang: python
+    script: |
+      import os
+      import re
+      import shlex
+      import shutil
+      import subprocess
+      import sys
+      from difflib import SequenceMatcher
+      from pathlib import Path
+
+      query_raw = """{{app}}""".strip()
+      if not query_raw:
+          print("App not found: (empty)", file=sys.stderr)
+          sys.exit(1)
+
+      def _norm(text: str) -> str:
+          text = (text or "").lower()
+          text = text.replace("_", " ").replace("-", " ")
+          text = re.sub(r"[^0-9a-zа-яё]+", " ", text, flags=re.IGNORECASE)
+          text = re.sub(r"\s+", " ", text).strip()
+          return text
+
+      def _strip_noise(text: str) -> str:
+          text = _norm(text)
+          # remove common filler words
+          text = re.sub(r"\b(на|в|у|мой|мои|моем|моём|пк|компьютере|ноутбуке|"
+                        r"on|in|my|pc|computer|laptop)\b", " ", text, flags=re.IGNORECASE)
+          text = re.sub(r"\s+", " ", text).strip()
+          return text
+
+      def _score(query: str, candidate: str) -> float:
+          if not candidate:
+              return 0.0
+          if query and query in candidate:
+              return 1.0
+          return SequenceMatcher(None, query, candidate).ratio()
+
+      def _clean_exec(exec_line: str) -> str:
+          if not exec_line:
+              return ""
+          # drop desktop placeholders like %U, %f, etc.
+          cleaned = re.sub(r"%[fFuUdDnNickvm]", "", exec_line)
+          cleaned = cleaned.replace("%%", "%")
+          return cleaned.strip()
+
+      def _parse_desktop(path: Path) -> dict[str, str] | None:
+          name = ""
+          name_ru = ""
+          generic = ""
+          exec_line = ""
+          nodisplay = False
+          hidden = False
+          in_entry = False
+          try:
+              with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                  for raw in fh:
+                      line = raw.strip()
+                      if not line or line.startswith("#"):
+                          continue
+                      if line.startswith("["):
+                          in_entry = (line == "[Desktop Entry]")
+                          continue
+                      if not in_entry:
+                          continue
+                      if line.startswith("NoDisplay="):
+                          nodisplay = line.split("=", 1)[1].strip().lower() == "true"
+                      elif line.startswith("Hidden="):
+                          hidden = line.split("=", 1)[1].strip().lower() == "true"
+                      elif line.startswith("Name[ru") and not name_ru:
+                          name_ru = line.split("=", 1)[1].strip()
+                      elif line.startswith("Name=") and not name:
+                          name = line.split("=", 1)[1].strip()
+                      elif line.startswith("GenericName=") and not generic:
+                          generic = line.split("=", 1)[1].strip()
+                      elif line.startswith("Exec=") and not exec_line:
+                          exec_line = line.split("=", 1)[1].strip()
+          except Exception:
+              return None
+          if hidden or nodisplay:
+              return None
+          desktop_id = path.stem
+          display = name_ru or name or generic or desktop_id
+          return {
+              "id": desktop_id,
+              "name": display,
+              "exec": exec_line,
+              "path": str(path),
+          }
+
+      def _collect_desktops() -> list[dict[str, str]]:
+          dirs = [
+              Path.home() / ".local/share/applications",
+              Path("/usr/share/applications"),
+              Path("/usr/local/share/applications"),
+              Path.home() / ".local/share/flatpak/exports/share/applications",
+              Path("/var/lib/flatpak/exports/share/applications"),
+          ]
+          out: list[dict[str, str]] = []
+          seen: set[str] = set()
+          for d in dirs:
+              if not d.exists():
+                  continue
+              for path in d.glob("*.desktop"):
+                  if path.name in seen:
+                      continue
+                  entry = _parse_desktop(path)
+                  if not entry:
+                      continue
+                  seen.add(path.name)
+                  out.append(entry)
+          return out
+
+      def _launch(entry: dict[str, str]) -> tuple[bool, str]:
+          desktop_id = entry.get("id") or ""
+          exec_line = entry.get("exec") or ""
+          if desktop_id and shutil.which("gtk-launch"):
+              subprocess.Popen(["gtk-launch", desktop_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              return True, "gtk-launch"
+          exec_cmd = _clean_exec(exec_line)
+          if exec_cmd:
+              args = shlex.split(exec_cmd)
+              subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              return True, "exec"
+          return False, "no-launcher"
+
+      query = _strip_noise(query_raw)
+      if not query:
+          query = _norm(query_raw)
+
+      apps = _collect_desktops()
+      best = None
+      best_score = 0.0
+      for app in apps:
+          candidates = [
+              _norm(app.get("name", "")),
+              _norm(app.get("id", "")),
+              _norm(app.get("exec", "")),
+          ]
+          score = 0.0
+          for cand in candidates:
+              score = max(score, _score(query, cand))
+          qt = set(query.split())
+          ct = set(candidates[0].split())
+          if qt:
+              score = max(score, len(qt & ct) / max(len(qt), 1))
+          if score > best_score:
+              best_score = score
+              best = app
+
+      if not best or best_score < 0.55:
+          print(f"App not found: {query_raw}", file=sys.stderr)
+          sys.exit(1)
+
+      ok, method = _launch(best)
+      if not ok:
+          print(f"App not found: {query_raw}", file=sys.stderr)
+          sys.exit(1)
+
+      print("OK")
   verify:
     lang: python
     script: print('OK')
